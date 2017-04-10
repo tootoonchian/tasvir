@@ -1,3 +1,4 @@
+#include <assert.h>
 #include <stdio.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -9,27 +10,16 @@ main(int argc, char **argv) {
     (void)argc;
     (void)argv;
 
-    if (tasvir_init(1)) {
+    tasvir_area_desc *root_desc = tasvir_init(1, TASVIR_INSTANCE_TYPE_APP);
+    if (root_desc == MAP_FAILED) {
         fprintf(stderr, "test_ctrl: tasvir_init failed\n");
         return -1;
     }
 
-    tasvir_meta *meta = tasvir_new("test", 10 * 1024 * 1024);
-    if (meta == MAP_FAILED) {
-        fprintf(stderr, "test_ctrl: tasvir_new failed\n");
-        return -1;
-    }
+    tasvir_area_desc *d = tasvir_new(root_desc, NULL, TASVIR_AREA_TYPE_APP, "test", 10 * 1024 * 1024, 5000, 128);
+    assert(d);
 
-    tasvir_area *area = tasvir_area_new(meta, "amin", 1000);
-    if (area == NULL) {
-        fprintf(stderr, "test_ctrl: tasvir_area_new failed\n");
-        return -1;
-    }
-
-    if (tasvir_delete(meta)) {
-        fprintf(stderr, "test_ctrl: tasvir_delete failed\n");
-        return -1;
-    }
+    // assert(tasvir_delete(d) == 0);
 
     return 0;
 }

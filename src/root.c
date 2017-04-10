@@ -13,7 +13,7 @@ main(int argc, char **argv) {
     (void)argc;
     (void)argv;
 
-    tasvir_area_desc *root_desc = tasvir_init(1, TASVIR_INSTANCE_TYPE_DAEMON);
+    tasvir_area_desc *root_desc = tasvir_init(1, TASVIR_INSTANCE_TYPE_ROOT);
     if (!root_desc) {
         fprintf(stderr, "tasvir_daemon: tasvir_init_daemon failed\n");
         return -1;
