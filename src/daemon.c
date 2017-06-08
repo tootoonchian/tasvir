@@ -1,4 +1,6 @@
+#include <assert.h>
 #include <errno.h>
+#include <rte_cycles.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -8,34 +10,34 @@
 
 #include "tasvir.h"
 
-int
-main(int argc, char **argv) {
-    (void)argc;
-    (void)argv;
+void usage(char *exec) { fprintf(stderr, "usage: %s root|daemon core\n", exec); }
 
-    tasvir_area_desc *root_desc = tasvir_init(1, TASVIR_INSTANCE_TYPE_DAEMON);
-    if (!root_desc) {
+int main(int argc, char **argv) {
+    if (argc != 3) {
+        usage(argv[0]);
+        return -1;
+    }
+
+    char *role = argv[1];
+    int core = atoi(argv[2]);
+    bool is_root = strcmp(role, "root") == 0;
+    bool is_daemon = strcmp(role, "daemon") == 0;
+
+    if (!(is_root || is_daemon)) {
+        usage(argv[0]);
+        return -1;
+    }
+
+    tasvir_area_desc *root_desc = tasvir_init(core, is_root ? TASVIR_THREAD_TYPE_ROOT : TASVIR_THREAD_TYPE_DAEMON);
+    if (root_desc == MAP_FAILED) {
         fprintf(stderr, "tasvir_daemon: tasvir_init_daemon failed\n");
         return -1;
     }
 
-    struct timespec ts = {0, 50000};
     while (true) {
-        tasvir_sync();
-        nanosleep(&ts, NULL);
-        tasvir_rpc_serve();
+        tasvir_service();
+        rte_delay_us_block(10);
     };
-
-    /*
-    struct tasvir_area area;
-    if (tasvir_attach("meta", 4096, &area))
-        return -1;
-    if (tasvir_detach(&area))
-        return -1;
-
-    int *a = malloc(sizeof(int));
-    *a = 10;
-    */
 
     return 0;
 }

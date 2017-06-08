@@ -2,8 +2,9 @@ BasedOnStyle: google
 UseTab: Never
 IndentWidth: 4
 # BreakBeforeBraces: Allman
-AlwaysBreakAfterDefinitionReturnType: true
+AlwaysBreakAfterDefinitionReturnType: false
 AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
 IndentCaseLabels: false
 ColumnLimit: 120
 AccessModifierOffset: -4
