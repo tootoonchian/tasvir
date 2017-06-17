@@ -8,7 +8,7 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 set(TASVIR_COMPILE_OPTIONS
-    -Wall -pedantic -Wextra -g -O2 -march=native -D_GNU_SOURCE=1
+    -Wall -pedantic -Wextra -g -O3 -march=native -D_GNU_SOURCE=1
     $<$<COMPILE_LANGUAGE:C>:-std=c11>
     $<$<COMPILE_LANGUAGE:C>:-D_POSIX_C_SOURCE=200809L>
     $<$<COMPILE_LANGUAGE:CXX>:-fno-rtti>

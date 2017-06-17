@@ -2,14 +2,18 @@
 TASVIR_SRCDIR=/opt/tasvir
 TASVIR_BINDIR=$TASVIR_SRCDIR/build/bin
 THIS=$TASVIR_SRCDIR/scripts/run.sh
-#RUN_PREFIX="/opt/tools/pmu-tools/toplev.py -l4 -S"
-#RUN_PREFIX="gdb -ex run --args"
-RUN_PREFIX=""
 PID_DAEMON=/var/run/tasvir-daemon.pid
 PID_BENCH=/var/run/tasvir-bench.pid
 
 prepare() {
-    export C=$(which clang)
+    max_freq=$(cat /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq)
+    for i in /sys/devices/system/cpu/*/cpufreq; do
+        echo performance > $i/scaling_governor
+        echo $max_freq > $i/scaling_min_freq
+        echo $max_freq > $i/scaling_max_freq
+    done
+
+    export CC=$(which clang)
     export CXX=$(which clang++)
 
     mkdir $TASVIR_SRCDIR/build &>/dev/null
@@ -25,22 +29,26 @@ cleanup() {
 }
 
 benchmark() {
-    nr_writes=$((50 * 1000 * 1000))
-    writes_per_service=10
+    nr_writes=$((500 * 1000 * 1000))
+    writes_per_service=100
     area_len=$((10 * 1024 * 1024))
-    core_daemon=48
-    core_bench=49
+    stride=8
+    core_daemon=0
+    core_bench=1
     session=tasvir_benchmark
     window_name=`date +"%Y%m%d-%H%M%S"`
     attach_cmd=$(if [ -z $TMUX ]; then echo "attach-session"; else echo "switch-client"; fi)
+    #wrapper="/opt/tools/pmu-tools/toplev.py -l4 -S"
+    wrapper="gdb -ex run --args"
+    #wrapper=""
 
     cleanup
     prepare
 
     byobu new-session -AdPs $session &>/dev/null
     byobu $attach_cmd -t $session \; \
-        new-window -t $session -n $window_name "start-stop-daemon --start --make-pidfile --pidfile $PID_DAEMON --exec /usr/bin/numactl -- -C $core_daemon $RUN_PREFIX $TASVIR_BINDIR/tasvir_daemon root $core_daemon; bash; byobu kill-window" \; \
-        split-window -t $session:$window_name -h "sleep 0.2; start-stop-daemon --start --make-pidfile --pidfile $PID_BENCH --exec /usr/bin/numactl -- -C $core_bench $RUN_PREFIX $TASVIR_BINDIR/tasvir_benchmark $core_bench $nr_writes $writes_per_service $area_len; $THIS cleanup; bash; byobu kill-window"
+        new-window -t $session -n $window_name "start-stop-daemon --start --make-pidfile --pidfile $PID_DAEMON --exec /usr/bin/numactl -- -C $core_daemon $wrapper $TASVIR_BINDIR/tasvir_daemon root $core_daemon; $THIS cleanup; bash; byobu kill-window" \; \
+        split-window -t $session:$window_name -h "sleep 0.2; start-stop-daemon --start --make-pidfile --pidfile $PID_BENCH --exec /usr/bin/numactl -- -C $core_bench $wrapper $TASVIR_BINDIR/tasvir_benchmark $core_bench $nr_writes $writes_per_service $area_len $stride; $THIS cleanup; bash; byobu kill-window"
 }
 
 dev() {

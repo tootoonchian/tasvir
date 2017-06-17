@@ -1,66 +1,64 @@
 #ifndef _TASVIR__H_
 #include <limits.h>
+#include <math.h>
 #include <mmintrin.h>
 #include <net/ethernet.h>
 #include <netinet/ip.h>
 #include <netinet/udp.h>
 #include <pthread.h>
+#include <rte_mbuf.h>
+#ifdef __cplusplus
+#include <atomic>
+using namespace std;
+#else
 #include <stdatomic.h>
+#endif
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-//#include <stdio.h>
 #include <stdlib.h>
 #include <sys/types.h>
 #include <uthash.h>
-//#include <uuid/uuid.h>
-
-#include <rte_mbuf.h>
 
 typedef uint64_t tasvir_log_t;
 
-#define TASVIR_SYNC_US (100000)                     // sync interval
-#define TASVIR_STAT_US (1 * 1000 * 1000)            // stat interval
-#define TASVIR_BARRIER_ENTER_US (200)               // max time to enter sync
-#define TASVIR_BARRIER_EXIT_US (100 * 1000)         // max time sync takes
-#define TASVIR_HEARTBEAT_US (100 * 1000)            // timer to announce a thread dead
-#define TASVIR_SYNC_JOB_BYTES (10UL * 1024 * 1024)  // max size of each job
-#define TASVIR_HUGEPAGE_SIZE (2097152)
+#define TASVIR_SYNC_US (100000)              // sync interval
+#define TASVIR_STAT_US (1 * 1000 * 1000)     // stat interval
+#define TASVIR_BARRIER_ENTER_US (200)        // max time to enter sync
+#define TASVIR_BARRIER_EXIT_US (100 * 1000)  // max time sync takes
+#define TASVIR_HEARTBEAT_US (100 * 1000)     // timer to announce a thread dead
 
+#define TASVIR_SYNC_JOB_BYTES (size_t)(1 << 20)  // max size of each job
+#define TASVIR_SYNC_NR_JOBS (512)
+#define TASVIR_HUGEPAGE_SIZE (size_t)(2 << 20)
 // #define TASVIR_ETH_PROTO (0x88b6)
 #define TASVIR_STRLEN_MAX (32)
 #define TASVIR_NR_FN (4096)
 #define TASVIR_NR_RPC_ARGS (8)
-#define TASVIR_NR_RPC_MSG (65535)
+#define TASVIR_NR_RPC_MSG (65536)
 #define TASVIR_RING_SIZE (256)
 #define TASVIR_NR_THREADS_AREA (128)
 #define TASVIR_NR_THREADS_LOCAL (64)
 #define TASVIR_THREAD_DAEMON_IDX (0)
 
+#define __TASVIR_LOG2(x) (31 - __builtin_clz(x | 1))
 #define TASVIR_CACHELINE_BYTES (64)
-#define TASVIR_SHIFT_BIT (6)                      // 1 bit per cacheline
-#define TASVIR_SHIFT_BYTE (TASVIR_SHIFT_BIT + 3)  // 1 bit per cacheline
-#define TASVIR_SHIFT_UNIT (TASVIR_SHIFT_BYTE + 3) /* log2(sizeof(tasvir_log_t)) == 3 */
-#define TASVIR_LOG_BIT (1 << TASVIR_SHIFT_BIT)
-#define TASVIR_LOG_UNIT (1 << TASVIR_SHIFT_UNIT)
-#define TASVIR_ALIGNMENT (TASVIR_LOG_UNIT)
+#define TASVIR_SHIFT_BIT (6)  // 1 bit per cacheline
+#define TASVIR_SHIFT_BYTE (TASVIR_SHIFT_BIT + __TASVIR_LOG2(CHAR_BIT))
+#define TASVIR_SHIFT_UNIT (TASVIR_SHIFT_BYTE + __TASVIR_LOG2(sizeof(tasvir_log_t)))
+#define TASVIR_ALIGNMENT (uintptr_t)(TASVIR_SHIFT_UNIT >= 12 ? (1 << TASVIR_SHIFT_UNIT) : 4096)
 #define TASVIR_ALIGNX(x, a) ((uintptr_t)(x + a - 1) & ~(a - 1))
-#define TASVIR_ALIGN(x) TASVIR_ALIGNX((uint8_t *)x, TASVIR_ALIGNMENT)
-#define TASVIR_SIZE_DESC (4096)
-#define TASVIR_SIZE_ROOT_CONTAINER (TASVIR_HUGEPAGE_SIZE)
-#define TASVIR_SIZE_LOCAL_STRUCT (TASVIR_HUGEPAGE_SIZE)
-#define TASVIR_SIZE_GLOBAL (4UL * 1024 * 1024 * 1024 * 1024)  // 4TB
-#define TASVIR_SIZE_LOG TASVIR_ALIGNX(TASVIR_SIZE_GLOBAL / (TASVIR_LOG_BIT * CHAR_BIT), TASVIR_HUGEPAGE_SIZE)
-#define TASVIR_SIZE_LOCAL (TASVIR_SIZE_LOCAL_STRUCT + TASVIR_SIZE_LOG + TASVIR_SIZE_GLOBAL)
-#define TASVIR_SIZE_WHOLE (TASVIR_SIZE_LOCAL + TASVIR_SIZE_GLOBAL)
+#define TASVIR_ALIGN(x) TASVIR_ALIGNX((uintptr_t)x, TASVIR_ALIGNMENT)
+#define TASVIR_SIZE_DATA (size_t) TASVIR_ALIGN((4UL << 40))  // must be a power of two; 4TB
+#define TASVIR_SIZE_LOG (size_t) TASVIR_ALIGN((TASVIR_SIZE_DATA >> TASVIR_SHIFT_BYTE))
+#define TASVIR_SIZE_LOCAL (size_t) TASVIR_ALIGN(TASVIR_HUGEPAGE_SIZE)
 #define TASVIR_ADDR_BASE (void *)(0x0000100000000000UL)
-#define TASVIR_ADDR_LOCAL (void *)TASVIR_ADDR_BASE
-#define TASVIR_ADDR_LOG \
-    (void *)TASVIR_ALIGNX((uint8_t *)TASVIR_ADDR_LOCAL + TASVIR_SIZE_LOCAL_STRUCT, TASVIR_HUGEPAGE_SIZE)
-#define TASVIR_ADDR_SHADOW (void *)((uint8_t *)TASVIR_ADDR_LOG + TASVIR_SIZE_LOG)
-#define TASVIR_ADDR_GLOBAL (void *)((uint8_t *)TASVIR_ADDR_SHADOW + TASVIR_SIZE_GLOBAL) /* lower bound */
-#define TASVIR_ADDR_END (void *)((uint8_t *)TASVIR_ADDR_GLOBAL + TASVIR_SIZE_GLOBAL)
-#define TASVIR_ADDR_ROOT_DESC (void *)((uint8_t *)TASVIR_ADDR_END - TASVIR_SIZE_DESC)
+#define TASVIR_ADDR_DATA (void *)(TASVIR_ADDR_BASE)
+#define TASVIR_ADDR_SHADOW (void *)((uint8_t *)TASVIR_ADDR_DATA + TASVIR_SIZE_DATA)
+#define TASVIR_ADDR_LOG (void *)((uint8_t *)TASVIR_ADDR_SHADOW + TASVIR_SIZE_DATA)
+#define TASVIR_ADDR_LOCAL (void *)((uint8_t *)TASVIR_ADDR_LOG + TASVIR_SIZE_LOG)
+#define TASVIR_ADDR_END (void *)((uint8_t *)TASVIR_ADDR_LOCAL + TASVIR_SIZE_LOCAL)
+#define TASVIR_ADDR_ROOT_DESC (void *)((uint8_t *)TASVIR_ADDR_SHADOW - TASVIR_HUGEPAGE_SIZE)
 #define TASVIR_DPDK_ADDR_BASE (void *)((uint8_t *)TASVIR_ADDR_END + TASVIR_HUGEPAGE_SIZE)
 
 #ifdef __cplusplus
@@ -213,7 +211,8 @@ struct tasvir_container {
 
 struct tasvir_local_dstate {  // daemon state
     uint64_t last_stat;
-    uint64_t last_sync;
+    uint64_t last_sync_start;
+    uint64_t last_sync_end;
     uint64_t sync_count;
     uint64_t sync_cumtime_us;
     uint64_t sync_cumbytes;
@@ -235,7 +234,7 @@ struct tasvir_local_istate {  // thread state
     struct rte_ring *ring_rx;
     bool sync;
     size_t nr_jobs;
-    tasvir_sync_job jobs[128];
+    tasvir_sync_job jobs[TASVIR_SYNC_NR_JOBS];
     size_t sync_cumbytes;
 } __attribute__((aligned(8)));
 
@@ -290,43 +289,56 @@ int tasvir_delete(tasvir_area_desc *d);
 tasvir_area_desc *tasvir_attach(tasvir_area_desc *pd, char *name);
 int tasvir_detach(tasvir_area_desc *d);
 void tasvir_set_owner(tasvir_area_desc *d, tasvir_thread *owner);
-// void tasvir_log_write_ext(void *addr, size_t len);
 
-/* naive log impl */
+/* log impl */
+static inline void *tasvir_addr_data(void *addr_log) {
+    ptrdiff_t offset = (uint8_t *)TASVIR_ADDR_DATA - (uint8_t *)((ptrdiff_t)TASVIR_ADDR_LOG << TASVIR_SHIFT_BYTE);
+    return (uint8_t *)(((ptrdiff_t)addr_log) << TASVIR_SHIFT_BYTE) + offset;
+}
 
-static inline void *tasvir_addr_shadow(void *addr) {
-    return (uint8_t *)addr - ((uint8_t *)TASVIR_ADDR_GLOBAL - (uint8_t *)TASVIR_ADDR_SHADOW);
+static inline uint64_t tasvir_addr_log_bit_offset(void *addr) {
+    uint64_t mask = ((1UL << TASVIR_SHIFT_UNIT) - 1) & (~0UL << TASVIR_SHIFT_BIT);
+    return _pext_u64((uintptr_t)addr, mask);
 }
 
 static inline tasvir_log_t *tasvir_addr_log(void *addr) {
-    ptrdiff_t addr_rel = (uint8_t *)addr - (uint8_t *)TASVIR_ADDR_GLOBAL;
-    return (tasvir_log_t *)((uint8_t *)TASVIR_ADDR_LOG + (addr_rel >> TASVIR_SHIFT_BYTE));
+    uint64_t mask = (TASVIR_SIZE_DATA - 1) & (~0UL << TASVIR_SHIFT_UNIT);
+    return (tasvir_log_t *)TASVIR_ADDR_LOG + _pext_u64((uintptr_t)addr, mask);
 }
 
-static inline void *tasvir_addr_from_log(tasvir_log_t *addr_log) {
-    ptrdiff_t addr_rel = (uint8_t *)addr_log - (uint8_t *)TASVIR_ADDR_LOG;
-    return (uint8_t *)TASVIR_ADDR_GLOBAL + (addr_rel << TASVIR_SHIFT_BYTE);
+static inline void *tasvir_addr_shadow(void *addr) {
+    ptrdiff_t offset = (uint8_t *)TASVIR_ADDR_SHADOW - (uint8_t *)TASVIR_ADDR_DATA;
+    return (uint8_t *)addr + offset;
 }
 
 static inline void tasvir_log_write(void *addr, size_t len) {
+    void *addr_end = (uint8_t *)addr + len;
     tasvir_log_t *addr_log = tasvir_addr_log(addr);
-    const int log_unit_bits_minus_one = CHAR_BIT * sizeof(tasvir_log_t) - 1;
-    int log_offset_bit = (ptrdiff_t)addr >> TASVIR_SHIFT_BIT;
-    int log_offset_bit_end = ((ptrdiff_t)addr + len) >> TASVIR_SHIFT_BIT;
-    int nbits = 1 + log_offset_bit_end - log_offset_bit;
-    log_offset_bit &= log_unit_bits_minus_one;
-    int nbits_this = ((nbits + log_offset_bit - 1) & log_unit_bits_minus_one) + 1 - log_offset_bit;
-    *addr_log |= ((uint64_t)((1L << 63) >> (nbits_this - 1))) >> log_offset_bit;
-    nbits -= nbits_this;
-    // fprintf(stderr, "addr=%p len=%lu offset=%d nbits=%d nbits_this=%d\n", addr, len, log_offset_bit, nbits,
-    // nbits_this);
+    tasvir_log_t *addr_end_log = tasvir_addr_log(addr_end);
+    uint64_t bit_start = tasvir_addr_log_bit_offset(addr);
+    uint64_t bit_end = tasvir_addr_log_bit_offset(addr_end);
+    /* fprintf(stderr, "%14d %-22.22s %p-%p (%luB) log:%p-%p bit:%lu-%lu\n", 0, "tasvir_log_write", addr, addr_end, len,
+       (void *)addr_log, (void *)addr_end_log, bit_start, bit_end); */
 
-    while (nbits > 0) {
-        ++addr_log;
-        nbits_this = 1 + ((nbits - 1) & log_unit_bits_minus_one);
-        *addr_log |= (1L << 63) >> (nbits_this - 1);
-        nbits -= nbits_this;
+    if (addr_log == addr_end_log) {
+        *addr_log |= (~0UL >> bit_start) & ((1L << 63) >> bit_end);
+    } else {
+        *addr_log |= ~0UL >> bit_start;
+        do {
+            addr_log++;
+            *addr_log = ~0UL;
+        } while (unlikely(addr_log < addr_end_log));
+        *addr_log |= (1L << 63) >> bit_end;
     }
+
+    /*
+    uint64_t mask_v[2] = {0, 0};
+    tasvir_log_t *addr_log_aligned = (tasvir_log_t *)((uintptr_t)addr_log & ~0xfUL);
+    mask_v[addr_log - addr_log_aligned] = (~0UL >> bit_start) & ((1L << 63) >> bit_end);
+    __m128i m = _mm_stream_load_si128((const __m128i *)(addr_log_aligned));
+    m = _mm_or_si128(m, _mm_set_epi64x(mask_v[1], mask_v[0]));
+    _mm_stream_si128((__m128i *)addr_log_aligned, m);
+    */
 }
 
 #ifdef __cplusplus
