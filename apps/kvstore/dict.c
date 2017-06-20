@@ -67,6 +67,22 @@ static int _dictKeyIndex(dict *ht, const void *key, unsigned int hash, dictEntry
 static int _dictInit(dict *ht, dictType *type, void *privDataPtr);
 static int _dictCreate(dict *d, unsigned long size, void *area);
 
+/* -------------------------- Panda's nonsense ---------------------------- */
+static inline void _dictFreeEntry(dict* d, dictEntry *e) {
+    if (d->type->entryDestructor) {
+        d->type->entryDestructor(d->privdata, e);
+    } else {
+        assert(0);
+        free(e);
+    }
+}
+
+static inline void _dictModed(dict *d, dictEntry **e) {
+    if (d->type->entryModed) {
+        d->type->entryModed(d->privdata, e);
+    }
+}
+
 /* -------------------------- hash functions -------------------------------- */
 
 static uint8_t dict_hash_function_seed[16];
@@ -109,8 +125,7 @@ static void _dictReset(dictht *ht)
 dict *dictCreate(dictType *type,
         void *privDataPtr,
         void *space,
-        size_t size,
-        Allocator *ea)
+        size_t size)
 {
     dict *d = (dict*)space;
     size_t remaining;
@@ -124,7 +139,6 @@ dict *dictCreate(dictType *type,
     }
     _dictInit(d,type,privDataPtr);
     _dictCreate(d, remaining, (void*)((size_t)space + sizeof(dict)));
-    d->ea = ea;
     return d;
 }
 
@@ -335,10 +349,15 @@ dictEntry *dictAddRaw(dict *d, void *key, dictEntry **existing)
      * system it is more likely that recently added entries are accessed
      * more frequently. */
     ht = dictIsRehashing(d) ? &d->ht[1] : &d->ht[0];
-    /*entry = malloc(sizeof(*entry));*/
-    entry = alloc_allocator(d->ea);
+    if (d->type->entryAlloc) {
+        entry = d->type->entryAlloc(d->privdata);
+    } else {
+        assert(0);
+        entry = malloc(sizeof(*entry));
+    }
     entry->next = ht->table[index];
     ht->table[index] = entry;
+    _dictModed(d, &ht->table[index]);
     ht->used++;
 
     /* Set the hash entry fields. */
@@ -407,14 +426,18 @@ static dictEntry *dictGenericDelete(dict *d, const void *key, int nofree) {
         while(he) {
             if (key==he->key || dictCompareKeys(d, key, he->key)) {
                 /* Unlink the element from the list */
-                if (prevHe)
+                if (prevHe) {
                     prevHe->next = he->next;
-                else
+                    _dictModed(d, &prevHe->next);
+                }
+                else {
                     d->ht[table].table[idx] = he->next;
+                    _dictModed(d, &d->ht[table].table[idx]);
+                }
                 if (!nofree) {
                     dictFreeKey(d, he);
                     dictFreeVal(d, he);
-                    free_allocator(d->ea, he);
+                    _dictFreeEntry(d, he);
                 }
                 d->ht[table].used--;
                 return he;
@@ -464,7 +487,7 @@ void dictFreeUnlinkedEntry(dict *d, dictEntry *he) {
     if (he == NULL) return;
     dictFreeKey(d, he);
     dictFreeVal(d, he);
-    free_allocator(d->ea, he);
+    _dictFreeEntry(d, he);
 }
 
 /* Destroy an entire dictionary */
@@ -482,7 +505,7 @@ int _dictClear(dict *d, dictht *ht, void(callback)(void *)) {
             nextHe = he->next;
             dictFreeKey(d, he);
             dictFreeVal(d, he);
-            free_allocator(d->ea, he);
+            _dictFreeEntry(d, he);
             ht->used--;
             he = nextHe;
         }

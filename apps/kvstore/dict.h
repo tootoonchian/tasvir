@@ -34,7 +34,6 @@
  */
 
 #include <stdint.h>
-#include "alloc.h"
 
 #ifndef __DICT_H
 #define __DICT_H
@@ -63,6 +62,9 @@ typedef struct dictType {
     int (*keyCompare)(void *privdata, const void *key1, const void *key2);
     void (*keyDestructor)(void *privdata, void *key);
     void (*valDestructor)(void *privdata, void *obj);
+    dictEntry *(*entryAlloc)(void *privdata);
+    void (*entryDestructor)(void *privdata, dictEntry *entry);
+    void (*entryModed)(void *privdata, dictEntry **entry); // Used to report writes in this case :(
 } dictType;
 
 /* This is our hash table structure. Every dictionary has two of this as we
@@ -80,7 +82,7 @@ typedef struct dict {
     dictht ht[2];
     long rehashidx; /* rehashing not in progress if rehashidx == -1 */
     unsigned long iterators; /* number of iterators currently running */
-    Allocator *ea;
+    //Allocator *ea;
 } dict;
 
 /* If safe is set to 1 this is a safe iterator, that means, you can call
@@ -123,6 +125,7 @@ typedef void (dictScanBucketFunction)(void *privdata, dictEntry **bucketref);
 #define dictSetDoubleVal(entry, _val_) \
     do { (entry)->v.d = _val_; } while(0)
 
+
 #define dictFreeKey(d, entry) \
     if ((d)->type->keyDestructor) \
         (d)->type->keyDestructor((d)->privdata, (entry)->key)
@@ -150,7 +153,7 @@ typedef void (dictScanBucketFunction)(void *privdata, dictEntry **bucketref);
 #define dictIsRehashing(d) ((d)->rehashidx != -1)
 
 /* API */
-dict *dictCreate(dictType *type, void *privDataPtr, void* space, size_t size, Allocator *a);
+dict *dictCreate(dictType *type, void *privDataPtr, void* space, size_t size);
 int dictExpand(dict *d, unsigned long size);
 int dictAdd(dict *d, void *key, void *val);
 dictEntry *dictAddRaw(dict *d, void *key, dictEntry **existing);

@@ -10,4 +10,6 @@ typedef struct dictWrapper {
 } dictWrapper;
 dictWrapper *initDictWrapper(void *space, size_t len, void *entrySpace, size_t entrySize, void *keySpace, size_t keyLen,
                              size_t keySize, void *valSpace, size_t valLen, size_t valSize);
+char *allocKey(dictWrapper *wrapper, const char *key);
+void *allocVal(dictWrapper *wrapper, void *val, size_t len);
 #endif

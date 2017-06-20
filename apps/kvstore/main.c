@@ -57,32 +57,19 @@ int main(__unused int argc, __unused char *argv[]) {
         initDictWrapper(dict, 1024 * 1024, entry, 1024 * 1024, key, 128, 1024 * 1024, val, 128, 1024 * 1024);
     assert(w != NULL);
     tasvir_service();
+    const char *KEY = "Hellooooo";
 
-    char *dictKey = (char *)alloc_allocator(w->keyAllocator);
-    tasvir_log_write(w->keyAllocator, sizeof(Allocator));
+    char *dictKey = allocKey(w, KEY);
 
-    strcpy(dictKey, "Hellooooo");
-    tasvir_log_write(dictKey, strlen(dictKey) + 1);
-
-    char *dictVal = (char *)alloc_allocator(w->valAllocator);
-    tasvir_log_write(w->valAllocator, sizeof(Allocator));
-
-    strcpy(dictVal, "World");
-    tasvir_log_write(dictVal, strlen(dictKey) + 1);
-
+    void *dictVal = allocVal(w, "World", strlen("World"));
     dictAdd(w->d, dictKey, dictVal);
-    tasvir_log_write(w->d->ht[0].table, w->d->ht[0].size * sizeof(dictEntry*));
+    /*tasvir_log_write(w->d->ht[0].table, w->d->ht[0].size * sizeof(dictEntry*));*/
+
     struct dictEntry *de = dictFind(w->d, "Hellooooo");
-    tasvir_log_write(de, sizeof(dictEntry));
     assert(de != NULL);
-    
     printf("Found value %s\n", de->v.val);
     dictDelete(w->d, "Hellooooo");
-    tasvir_log_write(w->d->ht[0].table, w->d->ht[0].size * sizeof(dictEntry*));
-    tasvir_log_write(de, sizeof(dictEntry));
-    tasvir_log_write(w->keyAllocator, sizeof(Allocator));
-    tasvir_log_write(w->valAllocator, sizeof(Allocator));
-
+    /*tasvir_log_write(w->d->ht[0].table, w->d->ht[0].size * sizeof(dictEntry*));*/
     de = dictFind(w->d, "Hellooooo");
     assert(de == NULL);
 
