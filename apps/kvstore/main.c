@@ -37,6 +37,7 @@ int main(__unused int argc, __unused char *argv[]) {
     tasvir_area_desc *d = NULL;
     tasvir_area_desc *root_desc = tasvir_init(0, TASVIR_THREAD_TYPE_APP);
     size_t area_size = 4 * 1024 * 1024;
+    char key_char[128];
     if (root_desc == MAP_FAILED) {
         printf("test_ctrl: tasvir_init failed\n");
         return -1;
@@ -65,7 +66,7 @@ int main(__unused int argc, __unused char *argv[]) {
     dictAdd(w->d, dictKey, dictVal);
     /*tasvir_log_write(w->d->ht[0].table, w->d->ht[0].size * sizeof(dictEntry*));*/
 
-    struct dictEntry *de = dictFind(w->d, "Hellooooo");
+    dictEntry *de = dictFind(w->d, "Hellooooo");
     assert(de != NULL);
     printf("Found value %s\n", de->v.val);
     dictDelete(w->d, "Hellooooo");
@@ -75,7 +76,23 @@ int main(__unused int argc, __unused char *argv[]) {
 
     printf("OK, this builds\n");
     while (true) {
-        tasvir_service();
+        for (int i = 0; i < 1000; i++) {
+            sprintf(key_char, "%d", i);
+            char *dkey = allocKey(w, key_char);
+            void *dval = allocVal(w, &i, sizeof(int));
+            dictAdd(w->d, dkey, dval);
+            if (i > 0) {
+                sprintf(key_char, "%d", i - 1);
+                de = dictFind(w->d, key_char);
+                assert(*((int*)de->v.val) == i - 1);
+            }
+            tasvir_service();
+        }
+        for (int i = 0; i < 1000; i++) {
+            sprintf(key_char, "%d", i);
+            dictDelete(w->d, key_char);
+            tasvir_service();
+        }
     }
 #ifdef _ALLOC_TEST_
     test_allocator();
