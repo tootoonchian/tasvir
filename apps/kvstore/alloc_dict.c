@@ -71,10 +71,15 @@ dictType AllocDictType = {hashCallback,     NULL,           NULL, compareCallbac
 dictWrapper *initDictWrapper(void *space, size_t len, void *entrySpace, size_t entrySize, void *keySpace, size_t keyLen,
                              size_t keySize, void *valSpace, size_t valLen, size_t valSize) {
     dictWrapper *wrapper = (dictWrapper *)space;
+    tasvir_log_write(wrapper, sizeof(dictWrapper));
     wrapper->entryAllocator = init_allocator(entrySpace, entrySize, sizeof(dictEntry));
+    tasvir_log_write(wrapper->entryAllocator, sizeof(Allocator));
     wrapper->keyAllocator = init_allocator(keySpace, keySize, keyLen);
+    tasvir_log_write(wrapper->keyAllocator, sizeof(Allocator));
     wrapper->valAllocator = init_allocator(valSpace, valSize, valLen);
+    tasvir_log_write(wrapper->valAllocator, sizeof(Allocator));
     void *dspace = (void *)(((intptr_t)space) + sizeof(dictWrapper));
     wrapper->d = dictCreate(&AllocDictType, wrapper, dspace, len - sizeof(dictWrapper));
+    tasvir_log_write(wrapper->d, sizeof(dict));
     return wrapper;
 }
