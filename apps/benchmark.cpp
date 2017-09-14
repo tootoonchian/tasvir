@@ -26,6 +26,8 @@ uint64_t xorshift128plus(void) {
     return s[1] + y;
 }
 
+double normalize_overhead(double i) { return i > 0 ? i : 0; }
+
 void init(void) {
     size_t i;
     random_device rd;
@@ -46,22 +48,6 @@ void random_write(uint8_t *addr, size_t len, int stride) {
         tasvir_log_write(addr, stride);
 }
 
-uint64_t gettime_us() { return 1E6 * rte_rdtsc() / rte_get_tsc_hz(); }
-
-uint64_t experiment(tasvir_area_desc *d, int count, int iter, int stride) {
-    uint64_t time_us = gettime_us();
-    int i;
-    while (count > 0) {
-        count -= iter;
-        i = iter;
-        while (i--)
-            random_write(d->h->data, d->len - 4096, stride);
-        if (do_service)
-            tasvir_service();
-    }
-    return (gettime_us() - time_us) / 1000;
-}
-
 void flush_cache() {
     int fd = open("/lib/modules/4.10.0-rc1+/updates/dkms/wbinvd.ko", O_RDONLY | O_CLOEXEC);
     if (!fd) {
@@ -70,6 +56,28 @@ void flush_cache() {
 
     syscall(__NR_finit_module, fd, "", 0);
     syscall(__NR_delete_module, "wbinvd", 0);
+}
+
+uint64_t gettime_us() { return 1E6 * rte_rdtsc() / rte_get_tsc_hz(); }
+
+uint64_t experiment(tasvir_area_desc *d, size_t len, int count, int iter, int stride) {
+    uint64_t time_us = gettime_us();
+    while (gettime_us() - time_us < 1000 * 1000)
+        tasvir_service();
+
+    flush_cache();
+    tasvir_sync_stats_reset();
+    time_us = gettime_us();
+    int i;
+    while (count > 0) {
+        count -= iter;
+        i = iter;
+        while (i--)
+            random_write(d->h->data, len - stride, stride);
+        if (do_service)
+            tasvir_service();
+    }
+    return (gettime_us() - time_us) / 1000;
 }
 
 int main(int argc, char **argv) {
@@ -85,9 +93,9 @@ int main(int argc, char **argv) {
 
     init();
 
-    tasvir_area_desc *root_desc = tasvir_init(core, TASVIR_THREAD_TYPE_APP);
+    tasvir_area_desc *root_desc = tasvir_init(TASVIR_THREAD_TYPE_APP, core, NULL);
     if (root_desc == MAP_FAILED) {
-        cerr << argv[0] << ": tasvir_init failed" << std::endl;
+        fprintf(stderr, "%s: tasvir_init failed\n", argv[0]);
         return -1;
     }
 
@@ -96,37 +104,48 @@ int main(int argc, char **argv) {
     param.owner = NULL;
     param.type = TASVIR_AREA_TYPE_APP;
     param.len = area_len;
+    param.stale_us = 50000;
     strcpy(param.name, "test");
-    tasvir_area_desc *d = tasvir_new(param, 5000, 0);
+    tasvir_area_desc *d = tasvir_new(param, 0);
     if (d == MAP_FAILED) {
-        cerr << argv[0] << ": tasvir_new failed" << std::endl;
+        fprintf(stderr, "%s: tasvir_new failed\n", argv[0]);
         return -1;
     }
 
-    /*
-    do_service = do_log = true;
-    fprintf(stderr, "took %ld msecs\n", experiment(d, count, iter, stride));
-    return 0;
-    */
+    // do_service = do_log = true;
+    // fprintf(stderr, "took %ld msecs\n", experiment(d, area_len, count, iter, stride));
+    // return 0;
 
-    uint64_t time_ms[4];
-    for (do_service = 1; do_service >= 0; do_service--)
+    uint64_t time_ms[2][2];
+    tasvir_sync_stats stats[2][2];
+    for (do_service = 1; do_service >= 0; do_service--) {
         for (do_log = 1; do_log >= 0; do_log--) {
-            flush_cache();
             fprintf(stderr, "   log%c service%c\n", do_log ? '+' : '-', do_service ? '+' : '-');
-            time_ms[do_log * 2 + do_service] = experiment(d, count, iter, stride);
+            time_ms[do_log][do_service] = experiment(d, area_len, count, iter, stride);
+            stats[do_log][do_service] = tasvir_sync_stats_get();
         }
+    }
     for (do_log = 0; do_log < 2; do_log++)
-        for (do_service = 0; do_service < 2; do_service++)
-            fprintf(stderr, "   log%c service%c: %5ld ms\n", do_log ? '+' : '-', do_service ? '+' : '-',
-                    time_ms[do_log * 2 + do_service]);
-    double overhead;
-    overhead = 100. * ((long)time_ms[1] - (long)time_ms[0]) / time_ms[0];
-    fprintf(stderr, "service overhead: %5.2f%%\n", overhead > 0 ? overhead : 0);
-    overhead = 100. * ((long)time_ms[2] - (long)time_ms[0]) / time_ms[0];
-    fprintf(stderr, "    log overhead: %5.2f%%\n", overhead > 0 ? overhead : 0);
-    overhead = 100. * ((long)time_ms[3] - (long)time_ms[0]) / time_ms[0];
-    fprintf(stderr, "   full overhead: %5.2f%%\n", overhead > 0 ? overhead : 0);
+        for (do_service = 0; do_service < 2; do_service++) {
+            fprintf(stderr, "   log%c service%c: %5ld ms (sync: count=%5ld, time_ms=%5ld, size=%9ldkB)\n",
+                    do_log ? '+' : '-', do_service ? '+' : '-', time_ms[do_log][do_service],
+                    stats[do_log][do_service].count, stats[do_log][do_service].cumtime_us / 1000,
+                    stats[do_log][do_service].cumbytes / 1000);
+        }
+    fprintf(stderr, "\n");
+    double overhead_service, overhead_sync, overhead_log, overhead_direct, overhead_indirect, overhead_full;
+    overhead_service = normalize_overhead(100. * ((long)time_ms[0][1] - (long)time_ms[0][0]) / time_ms[0][0]);
+    overhead_sync = (double)stats[1][1].cumtime_us / (10 * time_ms[0][0]);
+    overhead_log = normalize_overhead(100. * ((long)time_ms[1][0] - (long)time_ms[0][0]) / time_ms[0][0]);
+    overhead_full = normalize_overhead(100. * ((long)time_ms[1][1] - (long)time_ms[0][0]) / time_ms[0][0]);
+    overhead_direct = overhead_log + overhead_sync;
+    overhead_indirect = normalize_overhead(overhead_full - overhead_direct);
+    fprintf(stderr, " service overhead: %5.2f%%\n", overhead_service);
+    fprintf(stderr, "    sync overhead: %5.2f%%\n", overhead_sync);
+    fprintf(stderr, "     log overhead: %5.2f%%\n", overhead_log);
+    fprintf(stderr, "  direct overhead: %5.2f%%\n", overhead_direct);
+    fprintf(stderr, "indirect overhead: %5.2f%%\n", overhead_indirect);
+    fprintf(stderr, "    full overhead: %5.2f%%\n", overhead_full);
 
     return 0;
 }

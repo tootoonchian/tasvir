@@ -18,14 +18,14 @@ set(TASVIR_COMPILE_OPTIONS
 include_directories(./include $ENV{RTE_SDK}/$ENV{RTE_TARGET}/include)
 link_directories($ENV{RTE_SDK}/$ENV{RTE_TARGET}/lib ${CMAKE_LIBRARY_OUTPUT_DIRECTORY})
 
-set(DPDK_LIB "-ldl -lpthread -Wl,--whole-archive -ldpdk -lm -ldl -Wl,--no-whole-archive")
+## for LLVM pass
+find_package(LLVM REQUIRED CONFIG)
+
+## TODO: add DPDK dependency check
 
 add_library(tasvir STATIC src/tasvir.c)
-target_link_libraries(tasvir uuid rt ${DPDK_LIB})
+target_link_libraries(tasvir uuid dl m rt pthread "-Wl,--whole-archive -ldpdk -Wl,--no-whole-archive")
 target_compile_options(tasvir PUBLIC ${TASVIR_COMPILE_OPTIONS})
-
-## LLVM pass
-find_package(LLVM REQUIRED CONFIG)
 
 add_library(tasvir_pass MODULE src/llvm_pass.cpp)
 target_compile_definitions(tasvir_pass PUBLIC ${LLVM_DEFINITIONS})
@@ -37,7 +37,7 @@ macro(add_tasvir_exec target)
     add_dependencies(${target} tasvir)
 
     target_compile_options(${target} PUBLIC ${TASVIR_COMPILE_OPTIONS})
-    target_link_libraries(${target} tasvir rt)
+    target_link_libraries(${target} tasvir rt numa)
 endmacro(add_tasvir_exec)
 
 macro(add_tasvir_instrumented_exec target)
@@ -49,7 +49,7 @@ macro(add_tasvir_instrumented_exec target)
     set_target_properties(${target} PROPERTIES COMPILE_FLAGS "-Xclang -load -Xclang ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/libtasvir_pass.so")
 
     target_compile_options(${target} PUBLIC ${TASVIR_COMPILE_OPTIONS})
-    target_link_libraries(${target} tasvir rt)
+    target_link_libraries(${target} tasvir rt numa)
 endmacro(add_tasvir_instrumented_exec)
 
 add_subdirectory(src)
