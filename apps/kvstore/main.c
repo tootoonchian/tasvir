@@ -1,7 +1,10 @@
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <unistd.h>
+#include <time.h>
 #include "alloc.h"
 #include "alloc_dict.h"
 #include "tasvir.h"
@@ -31,13 +34,140 @@ void test_allocator() {
     }
 }
 #endif
+struct kv_test {
+    int id;
+    int servers;
+    char *access_log;
+    char *load_log;
+};
 
-int main(__unused int argc, __unused char *argv[]) {
+int parse_args(int argc, char* argv[], struct kv_test *out) {
+    int c;
+    while((c = getopt(argc, argv, "s:n:a:l:")) != -1) {
+        switch (c) {
+            case 's':
+                out->id = atoi(optarg);
+                /*printf("Server ID is %d\n", server_id);*/
+                break;
+            case 'n':
+                out->servers = atoi(optarg);
+                /*printf("Num regions is %d\n", nservers);*/
+                break;
+            case 'a':
+                out->access_log = optarg;
+                /*printf("Access log is at %s\n", access_log);*/
+                break;
+            case 'l':
+                out->load_log = optarg;
+                /*printf("Load log is at %s\n", load_log);*/
+        }
+    }
+    return 1;
+}
+
+inline void update(dictWrapper *w, char *key, char *value) {
+    char *dictKey = allocKey(w, key);
+    void *dictVal = allocVal(w, value, strlen(value));
+    printf("wrote \"%s\"\n", key);
+    dictReplace(w->d, dictKey, dictVal);
+    dictEntry *de = dictFind(w->d, key);
+    assert(de != NULL);
+}
+
+inline void get(dictWrapper *w, char *key) {
+    dictEntry *de;
+    int len = strlen(key);
+    if(key[len-1] == '\n') {
+        key[len-1] = 0;
+    }
+    de = dictFind(w->d, key);
+    if (de != NULL) {
+        printf("%s %s\n", key, de->v.val); 
+    } else {
+        printf("not found \"%s\"\n", key);
+    }
+}
+
+void read_load(struct kv_test *args, dictWrapper *w) {
+    FILE *file = fopen(args->load_log, "r");
+    if (file == NULL) {
+        perror("fopen");
+        return;
+    }
+    char *buf = NULL;
+    ssize_t nread;
+    size_t len = 0;
+    while ((nread = getline(&buf, &len, file)) > 0) {
+        buf[nread - 1] = 0;
+        char *out = strtok(buf, " ");
+        int server = atoi(out);
+        if (server != args->id) {
+            continue;
+        }
+        char *op = strtok(NULL, " ");
+        char *key = strtok(NULL, " ");
+        char *value = strtok(NULL, " ");
+        assert(strcmp(op, "UPDATE") == 0);
+        update(w, key, value);
+    }
+    tasvir_service();
+    free(buf);
+}
+
+void read_access(struct kv_test *args, dictWrapper *w) {
+    FILE *file = fopen(args->access_log, "r");
+    struct timespec start = {0, 0}, current = {0, 0};
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    if (file == NULL) {
+        perror("fopen");
+        return;
+    }
+    char *buf = NULL;
+    ssize_t nread;
+    size_t len = 0;
+    while ((nread = getline(&buf, &len, file)) > 0) {
+        buf[nread - 1] = 0;
+        char *out = strtok(buf, " ");
+        int server = atoi(out);
+        char *op = strtok(NULL, " ");
+        char *key = strtok(NULL, " ");
+        if (strcmp(op, "UPDATE") == 0) {
+            if (server != args->id) {
+                continue;
+            }
+            char *value = strtok(NULL, " ");
+            update(w, key, value);
+        } else if (strcmp(op, "GET") == 0) {
+            // FIXME: Sample this when testing throughput, reading clock is slow.
+            clock_gettime(CLOCK_MONOTONIC, &current);
+            printf("%lu %lu ", current.tv_sec - start.tv_sec, current.tv_nsec- start.tv_nsec);
+            // FIXME: Use server to select correct w
+            get(w, key);
+        }
+        tasvir_service();
+    }
+    free(buf);
+}
+
+int main(int argc, char *argv[]) {
+    // KEY SIZE is 64
+    const  size_t KEY_SIZE = 64;
+    // VALUE SIZE is 256
+    const size_t VALUE_SIZE = 256;
+
+    // FIXME: What units is this size in? I think it is in GB, cannot allocate 2 GB, not sure why.
+    // Set up a 2GB area
+    /*const size_t AREA_SIZE = 2 * 1024 * 1024 * 1024;*/
+    const size_t AREA_SIZE = 100 * 1024 * 1024;
+
+    struct kv_test args;
+
     tasvir_area_desc param;
     tasvir_area_desc *d = NULL;
     tasvir_area_desc *root_desc = tasvir_init(0, TASVIR_THREAD_TYPE_APP);
-    size_t area_size = 4 * 1024 * 1024;
-    char key_char[128];
+
+    char area_name[32];
+    parse_args(argc, argv, &args);
     if (root_desc == MAP_FAILED) {
         printf("test_ctrl: tasvir_init failed\n");
         return -1;
@@ -45,57 +175,26 @@ int main(__unused int argc, __unused char *argv[]) {
     param.pd = root_desc;
     param.owner = NULL;
     param.type = TASVIR_AREA_TYPE_APP;
-    param.len = area_size;
-    strcpy(param.name, "test");
+    param.len = AREA_SIZE;
+
+    // Naming based on ID, not sure if this is reasonable.
+    snprintf(area_name, 32, "kvs%d", args.id);
+    strcpy(param.name, area_name);
     d = tasvir_new(param, 5000, 0);
+    // FIXME: Need to register other wrappers, really not sure how one does that
+
+    // FIXME: Change these sizes to be real once 2G is fixed.
     assert(d != MAP_FAILED);
     uint8_t *data = d->h->data;
     void *dict = data;
-    void *entry = (void *)(data + 1024 * 1024);
-    void *key = (void *)(data + 2 * 1024 * 1024);
-    void *val = (void *)(data + 3 * 1024 * 1024);
+    void *entry = (void *)(data + 25 * 1024 * 1024);
+    void *key = (void *)(data +  50 * 1024 * 1024);
+    void *val = (void *)(data + 75 * 1024 * 1024);
     dictWrapper *w =
-        initDictWrapper(dict, 1024 * 1024, entry, 1024 * 1024, key, 128, 1024 * 1024, val, 128, 1024 * 1024);
-    assert(w != NULL);
-    tasvir_service();
-    const char *KEY = "Hellooooo";
+        initDictWrapper(dict, 1024 * 1024, entry, 1024 * 1024, key, KEY_SIZE, 1024 * 1024, 
+                val, VALUE_SIZE, 1024 * 1024);
+    read_load(&args, w);
+    // FIXME: Synchronize here waiting for all the other servers to finish loading.
+    read_access(&args, w);
 
-    char *dictKey = allocKey(w, KEY);
-
-    void *dictVal = allocVal(w, "World", strlen("World"));
-    dictAdd(w->d, dictKey, dictVal);
-    /*tasvir_log_write(w->d->ht[0].table, w->d->ht[0].size * sizeof(dictEntry*));*/
-
-    dictEntry *de = dictFind(w->d, "Hellooooo");
-    assert(de != NULL);
-    printf("Found value %s\n", de->v.val);
-    dictDelete(w->d, "Hellooooo");
-    /*tasvir_log_write(w->d->ht[0].table, w->d->ht[0].size * sizeof(dictEntry*));*/
-    de = dictFind(w->d, "Hellooooo");
-    assert(de == NULL);
-
-    printf("OK, this builds\n");
-    while (true) {
-        for (int i = 0; i < 1000; i++) {
-            sprintf(key_char, "%d", i);
-            char *dkey = allocKey(w, key_char);
-            void *dval = allocVal(w, &i, sizeof(int));
-            dictAdd(w->d, dkey, dval);
-            if (i > 0) {
-                sprintf(key_char, "%d", i - 1);
-                de = dictFind(w->d, key_char);
-                assert(*((int*)de->v.val) == i - 1);
-            }
-            tasvir_service();
-        }
-        for (int i = 0; i < 1000; i++) {
-            sprintf(key_char, "%d", i);
-            dictDelete(w->d, key_char);
-            tasvir_service();
-        }
-    }
-#ifdef _ALLOC_TEST_
-    test_allocator();
-    printf("OK, test passes\n");
-#endif
 }
