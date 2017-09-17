@@ -31,8 +31,8 @@ void handler(int sig) {
 int main(int argc, char **argv) {
     signal(SIGSEGV, handler);
     uint8_t daemon_type = TASVIR_THREAD_TYPE_DAEMON;
-    int core;
-    char *pciaddr;
+    int core = -1;
+    char *pciaddr = NULL;
 
     int c;
     while (1) {
@@ -71,6 +71,14 @@ int main(int argc, char **argv) {
         while (optind < argc)
             fprintf(stderr, "%s ", argv[optind++]);
         fprintf(stderr, "\n");
+        usage(argv[0]);
+    }
+
+    if (core == -1) {
+        fprintf(stderr, "no core provided\n");
+        usage(argv[0]);
+    } else if (!pciaddr) {
+        fprintf(stderr, "no pciaddr provided\n");
         usage(argv[0]);
     }
 
