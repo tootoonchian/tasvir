@@ -164,7 +164,7 @@ int main(int argc, char *argv[]) {
 
     tasvir_area_desc param;
     tasvir_area_desc *d = NULL;
-    tasvir_area_desc *root_desc = tasvir_init(0, TASVIR_THREAD_TYPE_APP);
+    tasvir_area_desc *root_desc = tasvir_init(TASVIR_THREAD_TYPE_APP, 0, NULL);
 
     char area_name[32];
     parse_args(argc, argv, &args);
@@ -180,7 +180,7 @@ int main(int argc, char *argv[]) {
     // Naming based on ID, not sure if this is reasonable.
     snprintf(area_name, 32, "kvs%d", args.id);
     strcpy(param.name, area_name);
-    d = tasvir_new(param, 5000, 0);
+    d = tasvir_new(param, 0);
     // FIXME: Need to register other wrappers, really not sure how one does that
 
     // FIXME: Change these sizes to be real once 2G is fixed.
