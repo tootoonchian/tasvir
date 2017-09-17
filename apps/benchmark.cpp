@@ -105,7 +105,7 @@ int main(int argc, char **argv) {
     param.type = TASVIR_AREA_TYPE_APP;
     param.len = area_len;
     param.stale_us = 50000;
-    strcpy(param.name, "test");
+    snprintf(param.name, sizeof(param.name), "benchmark-%04x", static_cast<uint16_t>(xorshift128plus()));
     tasvir_area_desc *d = tasvir_new(param, 0);
     if (d == MAP_FAILED) {
         fprintf(stderr, "%s: tasvir_new failed\n", argv[0]);

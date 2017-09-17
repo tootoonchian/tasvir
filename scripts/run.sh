@@ -40,6 +40,7 @@ benchmark() {
     session=tasvir_benchmark
     window_name=local-`date +"%Y%m%d-%H%M%S"`
     window_name2=remote-`date +"%Y%m%d-%H%M%S"`
+    thread_delay=5
     tmux has-session -t $session &>/dev/null
     if [ $? -ne 0 ]; then
         new_cmd="new-session -Ads $session ;"
@@ -50,7 +51,7 @@ benchmark() {
         new_cmd="$new_cmd switch-client -t $session"
     fi
     #wrapper="/opt/tools/pmu-tools/toplev.py -l4 -S"
-    wrapper="gdb -ex run --args"
+    #wrapper="gdb -ex run --args"
 
     #cleanup
     prepare
@@ -58,8 +59,8 @@ benchmark() {
     byobu $new_cmd \; \
         new-window -t $session -n $window_name "$THIS cleanup; start-stop-daemon --start --make-pidfile --pidfile $PID_DAEMON --exec /usr/bin/numactl -- -C $core_daemon $wrapper $TASVIR_BINDIR/tasvir_daemon --core $core_daemon --pciaddr $pciaddr --root; $THIS cleanup; bash; byobu kill-window" \; \
         new-window -t $session -n $window_name2 ssh -t c12 "$THIS cleanup; sleep 1; start-stop-daemon --start --make-pidfile --pidfile $PID_DAEMON --exec /usr/bin/numactl -- -C $core_daemon $wrapper $TASVIR_BINDIR/tasvir_daemon --core $core_daemon --pciaddr $pciaddr_remote; $THIS cleanup; bash; byobu kill-window" \; \
-        split-window -t $session:$window_name -h "sleep 2; start-stop-daemon --start --make-pidfile --pidfile $PID_BENCH --exec /usr/bin/numactl -- -C $core_bench $wrapper $TASVIR_BINDIR/tasvir_benchmark $core_bench $nr_writes $writes_per_service $area_len $stride; $THIS cleanup; bash; byobu kill-window" \; #\
-        #split-window -t $session:$window_name2 -h ssh -t c12 "sleep 10; start-stop-daemon --start --make-pidfile --pidfile $PID_BENCH --exec /usr/bin/numactl -- -C $core_bench $wrapper $TASVIR_BINDIR/tasvir_benchmark $core_bench $nr_writes $writes_per_service $area_len $stride; $THIS cleanup; bash; byobu kill-window"
+        split-window -t $session:$window_name -h "sleep $thread_delay; start-stop-daemon --start --make-pidfile --pidfile $PID_BENCH --exec /usr/bin/numactl -- -C $core_bench $wrapper $TASVIR_BINDIR/tasvir_benchmark $core_bench $nr_writes $writes_per_service $area_len $stride; $THIS cleanup; bash; byobu kill-window" \; \
+        split-window -t $session:$window_name2 -h ssh -t c12 "sleep $thread_delay; start-stop-daemon --start --make-pidfile --pidfile $PID_BENCH --exec /usr/bin/numactl -- -C $core_bench $wrapper $TASVIR_BINDIR/tasvir_benchmark $core_bench $nr_writes $writes_per_service $area_len $stride; $THIS cleanup; bash; byobu kill-window"
 }
 
 dev() {

@@ -39,6 +39,7 @@ static tasvir_tls_state ttls; /* tasvir thread-local state */
 static inline int tasvir_attach_helper(tasvir_area_desc *, tasvir_node *);
 static inline tasvir_thread *tasvir_init_thread(pid_t pid, uint16_t core, uint8_t type);
 static inline void tasvir_init_finish(tasvir_thread *);
+static inline size_t tasvir_sync_area_external_boot(tasvir_area_desc *d, bool boot);
 
 /* rpc helpers */
 
@@ -114,29 +115,30 @@ static inline bool tasvir_is_owner(tasvir_area_desc *d) {
 static inline bool tasvir_tid_match(tasvir_tid *id, tasvir_tid_type t) {
     switch (t) {
     case TASVIR_TID_BROADCAST:
-        return memcmp(id, &ttls.any_dst_id, sizeof(tasvir_tid)) == 0;
+        return memcmp(id, &ttls.local->dstate.broadcast_tid, sizeof(tasvir_tid)) == 0;
     case TASVIR_TID_UPDATE:
-        return memcmp(id, &ttls.update_dst_id, sizeof(tasvir_tid)) == 0;
+        return memcmp(id, &ttls.local->dstate.update_tid, sizeof(tasvir_tid)) == 0;
     case TASVIR_TID_LOCAL:
-        return memcmp(&id->nid, ttls.node ? &ttls.node->id : &ttls.any_src_id.nid, sizeof(tasvir_nid)) == 0;
+        return memcmp(&id->nid, ttls.node ? &ttls.node->nid : &ttls.local->dstate.nodecast_tid.nid,
+                      sizeof(tasvir_nid)) == 0;
     case TASVIR_TID_DEFAULT:
-        return 1;
+        return true;
     default:
-        return 0;
+        return false;
     }
 }
 
-static inline bool tasvir_is_thread_local(tasvir_thread *i) { return tasvir_tid_match(&i->id, TASVIR_TID_LOCAL); }
+static inline bool tasvir_is_thread_local(tasvir_thread *t) { return tasvir_tid_match(&t->tid, TASVIR_TID_LOCAL); }
 
-static inline void tasvir_tid2str(tasvir_tid *id, size_t buf_size, char *buf) {
-    ether_format_addr(buf, buf_size, &id->nid.mac_addr);
-    snprintf(&buf[strlen(buf)], buf_size - strlen(buf), ":%d", id->idx);
+static inline void tasvir_tid2str(tasvir_tid *tid, size_t buf_size, char *buf) {
+    ether_format_addr(buf, buf_size, &tid->nid.mac_addr);
+    snprintf(&buf[strlen(buf)], buf_size - strlen(buf), ":%d", tid->idx);
 }
 
 static inline void tasvir_print_msg_rpc_info(tasvir_msg_rpc *msg, bool inbound) {
     tasvir_str src_str, dst_str;
-    tasvir_tid2str(&msg->h.src_id, sizeof(src_str), src_str);
-    tasvir_tid2str(&msg->h.dst_id, sizeof(dst_str), dst_str);
+    tasvir_tid2str(&msg->h.src_tid, sizeof(src_str), src_str);
+    tasvir_tid2str(&msg->h.dst_tid, sizeof(dst_str), dst_str);
     TASVIR_LOG("%s %s->%s id=%d type=%s desc=%s fid=%d\n", inbound ? "incoming" : "outgoing", src_str, dst_str,
                msg->h.id, msg->h.type == TASVIR_MSG_TYPE_RPC_REQUEST ? "request" : "response",
                msg->d ? msg->d->name : "ROOT", msg->fid);
@@ -292,7 +294,7 @@ static int tasvir_init_port(char *pciaddr) {
     }
     ttls.local->dstate.port_id = 0;
     rte_eth_macaddr_get(ttls.local->dstate.port_id, &ttls.local->dstate.mac_addr);
-    ether_addr_copy(&ttls.local->dstate.mac_addr, &ttls.any_src_id.nid.mac_addr);
+    ether_addr_copy(&ttls.local->dstate.mac_addr, &ttls.local->dstate.nodecast_tid.nid.mac_addr);
 
     struct rte_eth_dev_info dev_info;
     struct rte_eth_conf port_conf;
@@ -415,6 +417,15 @@ static int tasvir_init_local() {
 
         /* timing */
         ttls.local->tsc_hz = rte_get_tsc_hz();
+
+        /* ids */
+        ttls.local->dstate.update_tid.nid = (tasvir_nid){.mac_addr = {{0x01, 0x00, 0x5e, 0x00, 0x00, 0x00}}};
+        ttls.local->dstate.update_tid.idx = -1;
+        ttls.local->dstate.update_tid.pid = -1;
+        ttls.local->dstate.broadcast_tid.nid = (tasvir_nid){.mac_addr = {{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}}};
+        ttls.local->dstate.broadcast_tid.idx = -1;
+        ttls.local->dstate.broadcast_tid.pid = -1;
+        ttls.local->dstate.nodecast_tid = ttls.local->dstate.broadcast_tid;
     }
 
     return 0;
@@ -454,11 +465,13 @@ static int tasvir_init_node() {
 
     if (ttls.is_daemon) {
         /* id and address */
+        // feeding boot_us so that could be later use this node's clock rather than root's
         ttls.node_desc = tasvir_new((tasvir_area_desc){.pd = ttls.root_desc,
                                                        .owner = NULL,
                                                        .type = TASVIR_AREA_TYPE_NODE,
                                                        .name_static = *(tasvir_str_static *)name,
                                                        .len = sizeof(tasvir_node),
+                                                       .boot_us = tasvir_gettime_us(),
                                                        .stale_us = 50000},
                                     0);
         if (ttls.node_desc == MAP_FAILED) {
@@ -467,7 +480,7 @@ static int tasvir_init_node() {
         }
         ttls.node = (tasvir_node *)ttls.node_desc->h->data;
         memset(ttls.node, 0, sizeof(tasvir_node));
-        ether_addr_copy(&ttls.local->dstate.mac_addr, &ttls.node->id.mac_addr);
+        ether_addr_copy(&ttls.local->dstate.mac_addr, &ttls.node->nid.mac_addr);
         ttls.node->heartbeat_us = TASVIR_HEARTBEAT_US;
 
         /* time */
@@ -513,9 +526,9 @@ static inline tasvir_thread *tasvir_init_thread(pid_t pid, uint16_t core, uint8_
         tasvir_log_write(t, sizeof(tasvir_thread));
         t->core = core;
         t->type = type;
-        t->id.nid = ttls.node->id;
-        t->id.idx = tid;
-        t->id.pid = pid;
+        t->tid.nid = ttls.node->nid;
+        t->tid.idx = tid;
+        t->tid.pid = pid;
         t->status = TASVIR_THREAD_STATUS_BOOTING;
 
         tasvir_local_tstate *tstate = &ttls.local->tstate[tid];
@@ -538,7 +551,7 @@ static inline tasvir_thread *tasvir_init_thread(pid_t pid, uint16_t core, uint8_
         pthread_mutex_unlock(&ttls.local->mutex_boot);
     }
 
-    TASVIR_LOG("addr=%p tid=%d core=%d pid=%d status=%d\n", (void *)t, t->id.idx, t->core, t->id.pid, t->status);
+    TASVIR_LOG("addr=%p tid=%d core=%d pid=%d status=%d\n", (void *)t, t->tid.idx, t->core, t->tid.pid, t->status);
     return t;
 }
 
@@ -554,8 +567,8 @@ static inline void tasvir_kill_thread_ownership(tasvir_thread *t, tasvir_area_de
 
 static inline void tasvir_kill_thread(tasvir_thread *t) {
     assert(ttls.is_daemon && tasvir_is_thread_local(t));
-    tasvir_local_tstate *tstate = &ttls.local->tstate[t->id.idx];
-    TASVIR_LOG("thread=%d idle_time=%zd remaining_threads=%lu\n", t->id.idx, ttls.local->time_us - tstate->update_us,
+    tasvir_local_tstate *tstate = &ttls.local->tstate[t->tid.idx];
+    TASVIR_LOG("thread=%d idle_time=%zd remaining_threads=%lu\n", t->tid.idx, ttls.local->time_us - tstate->update_us,
                ttls.node->nr_threads - 1);
     tstate->sync = false;
     tstate->update_us = 0;
@@ -564,15 +577,15 @@ static inline void tasvir_kill_thread(tasvir_thread *t) {
     tasvir_kill_thread_ownership(t, ttls.root_desc);
 
     /* kill by pid */
-    /* kill(t->id.pid, SIGKILL); */
+    /* kill(t->tid.pid, SIGKILL); */
 
     ttls.node->nr_threads--;
     tasvir_log_write(&ttls.node->nr_threads, sizeof(ttls.node->nr_threads));
     t->status = TASVIR_THREAD_STATUS_DEAD;
     tasvir_log_write(&t->status, sizeof(t->status));
 
-    rte_ring_free(ttls.local->tstate[t->id.idx].ring_rx);
-    rte_ring_free(ttls.local->tstate[t->id.idx].ring_tx);
+    rte_ring_free(ttls.local->tstate[t->tid.idx].ring_rx);
+    rte_ring_free(ttls.local->tstate[t->tid.idx].ring_tx);
 }
 
 static inline void tasvir_init_finish(tasvir_thread *t) {
@@ -589,17 +602,19 @@ static inline void tasvir_init_finish(tasvir_thread *t) {
         /* backfill area owners */
         if (t == ttls.thread) {
             tasvir_log_write(&ttls.node_desc->owner, sizeof(tasvir_thread *));
-            ttls.node_desc->owner = ttls.thread;
             if (ttls.is_root) {
+                ttls.node_desc->owner = ttls.thread;
                 tasvir_log_write(&ttls.root_desc->owner, sizeof(tasvir_thread *));
                 ttls.root_desc->owner = ttls.thread;
+            } else {
+                tasvir_set_owner(ttls.node_desc, ttls.thread);
             }
         }
     } else {
         tasvir_rpc_sync(ttls.node_desc, 10 * 1000 * 1000, &rpc_tasvir_init_finish, t);
     }
 
-    TASVIR_LOG("tid=%d core=%d pid=%d\n", t->id.idx, t->core, t->id.pid);
+    TASVIR_LOG("tid=%d core=%d pid=%d\n", t->tid.idx, t->core, t->tid.pid);
 }
 
 tasvir_area_desc *tasvir_init(uint8_t type, uint16_t core, char *pciaddr) {
@@ -609,14 +624,6 @@ tasvir_area_desc *tasvir_init(uint8_t type, uint16_t core, char *pciaddr) {
     memset(&ttls, 0, sizeof(tasvir_tls_state));
     ttls.is_daemon = type == TASVIR_THREAD_TYPE_DAEMON || type == TASVIR_THREAD_TYPE_ROOT;
     ttls.is_root = type == TASVIR_THREAD_TYPE_ROOT;
-
-    ttls.update_dst_id.nid = (tasvir_nid){.mac_addr = {{0x01, 0x00, 0x5e, 0x00, 0x00, 0x00}}};
-    ttls.update_dst_id.idx = -1;
-    ttls.update_dst_id.pid = -1;
-    ttls.any_dst_id.nid = (tasvir_nid){.mac_addr = {{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}}};
-    ttls.any_dst_id.idx = -1;
-    ttls.any_dst_id.pid = -1;
-    ttls.any_src_id = ttls.any_dst_id;
 
     tasvir_init_rpc();
 
@@ -724,9 +731,12 @@ tasvir_area_desc *tasvir_new(tasvir_area_desc desc, size_t container_len) {
         tasvir_log_write(d, sizeof(tasvir_area_desc));
         memcpy(d, &desc, sizeof(tasvir_area_desc));
         d->h = h;
-        d->boot_us = time_us;
+        if (d->boot_us == 0)
+            d->boot_us = time_us;
     } else {
         d = tasvir_rpc_sync(desc.pd, 10 * 1000 * 1000, &rpc_tasvir_new, desc, container_len);
+        while (!d->h)
+            tasvir_service();
         if (!d || !d->h) {
             return MAP_FAILED;
         }
@@ -829,10 +839,20 @@ static inline int tasvir_attach_helper(tasvir_area_desc *d, tasvir_node *node) {
             return -1;
         }
 
+        tasvir_log_write(&d->h->users[d->h->nr_users], sizeof(tasvir_area_user));
         if (node) {
             d->h->users[d->h->nr_users].node = node;
             d->h->users[d->h->nr_users].version = 0;
             d->h->nr_users++;
+        }
+
+        tasvir_sync_area_external_boot(d, true);
+        // FIXME: hack to receive thread id info
+        if (d == ttls.root_desc) {
+            tasvir_area_container *c = (tasvir_area_container *)d->h->data;
+            for (size_t i = 0; i < c->nr_areas; i++)
+                if (c->descs[i].type == TASVIR_AREA_TYPE_NODE)
+                    tasvir_sync_area_external_boot(&c->descs[i], true);
         }
     } else {
         if (tasvir_rpc_sync(d, 10 * 1000 * 1000, &rpc_tasvir_attach_helper, d, node) != 0 || !d->h)
@@ -912,22 +932,22 @@ void tasvir_set_owner(tasvir_area_desc *d, tasvir_thread *owner) {
 /* return 0 if message sent out */
 static int tasvir_route_msg(tasvir_msg *msg, bool inbound) {
     /* destination broadcast is only meant for the root daemon */
-    bool is_dst_any = tasvir_tid_match(&msg->dst_id, TASVIR_TID_BROADCAST);
-    bool is_dst_update = tasvir_tid_match(&msg->dst_id, TASVIR_TID_UPDATE);
+    bool is_dst_any = tasvir_tid_match(&msg->dst_tid, TASVIR_TID_BROADCAST);
+    bool is_dst_update = tasvir_tid_match(&msg->dst_tid, TASVIR_TID_UPDATE);
     bool is_dst_local = is_dst_any ? ttls.is_root || msg->type == TASVIR_MSG_TYPE_MEM
-                                   : is_dst_update || tasvir_tid_match(&msg->dst_id, TASVIR_TID_LOCAL);
-    bool is_mine = inbound && is_dst_local && ((is_dst_any && ttls.is_root) || (is_dst_update && ttls.is_daemon) ||
-                                               !ttls.thread || msg->dst_id.idx == ttls.thread->id.idx);
+                                   : is_dst_update || tasvir_tid_match(&msg->dst_tid, TASVIR_TID_LOCAL);
+    bool is_dst_me = inbound && is_dst_local && ((is_dst_any && ttls.is_root) || (is_dst_update && ttls.is_daemon) ||
+                                                 !ttls.thread || msg->dst_tid.idx == ttls.thread->tid.idx);
     struct rte_ring *r;
 
-    if (is_mine || (inbound && !ttls.is_daemon)) {
+    if (is_dst_me || (inbound && !ttls.is_daemon)) {
         /* no-op when message is ours or reached here by error */
         return -1;
     } else if (ttls.is_daemon) {
-        uint16_t tid = is_dst_any ? TASVIR_THREAD_DAEMON_IDX : msg->dst_id.idx;
+        uint16_t tid = msg->dst_tid.idx == (uint16_t)-1 ? TASVIR_THREAD_DAEMON_IDX : msg->dst_tid.idx;
         r = is_dst_local ? ttls.local->tstate[tid].ring_rx : ttls.local->ring_ext_tx;
     } else {
-        uint16_t tid = ttls.thread ? ttls.thread->id.idx : TASVIR_THREAD_DAEMON_IDX;
+        uint16_t tid = ttls.thread ? ttls.thread->tid.idx : TASVIR_THREAD_DAEMON_IDX;
         r = ttls.local->tstate[tid].ring_tx;
     }
 
@@ -936,16 +956,6 @@ static int tasvir_route_msg(tasvir_msg *msg, bool inbound) {
         rte_mempool_put(ttls.local->mp, (void *)msg);
         abort();
         return -1;
-    }
-    if (!ttls.is_root && msg->id > 1000) {
-        tasvir_str src_str, dst_str;
-        tasvir_tid2str(&msg->src_id, sizeof(src_str), src_str);
-        tasvir_tid2str(&msg->dst_id, sizeof(dst_str), dst_str);
-        TASVIR_LOG("%s %s->%s id=%d type=%s\n", inbound ? "incoming" : "outgoing", src_str, dst_str, msg->id,
-                   msg->type == TASVIR_MSG_TYPE_RPC_REQUEST ? "request" : "response");
-
-        TASVIR_LOG("%d %d %d\n", is_dst_any, is_dst_local, is_mine);
-        abort();
     }
 
     return 0;
@@ -966,8 +976,8 @@ static tasvir_rpc_status *tasvir_vrpc_async(tasvir_area_desc *d, tasvir_fnptr fn
     assert(fni);
 
     /* FIXME: using daemon id as src during boot to simplify impl */
-    msg->h.src_id = ttls.thread ? ttls.thread->id : ttls.any_src_id;
-    msg->h.dst_id = d && d->owner ? d->owner->id : ttls.any_dst_id;
+    msg->h.src_tid = ttls.thread ? ttls.thread->tid : ttls.local->dstate.nodecast_tid;
+    msg->h.dst_tid = d && d->owner ? d->owner->tid : ttls.local->dstate.broadcast_tid;
     msg->h.id = ttls.nr_msgs++;
     msg->h.type = TASVIR_MSG_TYPE_RPC_REQUEST;
     msg->h.time_us = d && d->h ? d->h->update_us : ttls.local->time_us;
@@ -1045,8 +1055,10 @@ void *tasvir_rpc_sync(tasvir_area_desc *d, uint64_t timeout_us, tasvir_fnptr fnp
         tasvir_service();
     }
 
-    if (status->status != TASVIR_RPC_STATUS_DONE)
+    if (status->status != TASVIR_RPC_STATUS_DONE || !status->response->d->h ||
+        status->response->d->h->update_us < status->response->h.time_us) {
         abort();
+    }
 
     /* FIXME: horrible error handling */
     assert(status->status != TASVIR_RPC_STATUS_DONE || status->response);
@@ -1074,10 +1086,11 @@ static void tasvir_service_rpc_request(tasvir_msg_rpc *msg) {
     assert(fni);
     fni->fnptr(msg->data, fni->arg_offsets);
 
-    msg->h.dst_id = msg->h.src_id;
-    msg->h.src_id = ttls.thread ? ttls.thread->id : ttls.any_src_id;
+    /* modify the message into a response */
+    msg->h.dst_tid = msg->h.src_tid;
+    msg->h.src_tid = ttls.thread ? ttls.thread->tid : ttls.local->dstate.nodecast_tid;
     msg->h.type = TASVIR_MSG_TYPE_RPC_RESPONSE;
-    // FIXME: time_us here means the update_ts of the area
+    // receiver compares time_us with update_us of the area to ensure it includes the updates due to this msg
     msg->h.time_us = ttls.local->time_us;
     tasvir_print_msg_rpc_info(msg, false);
     if (tasvir_route_msg((tasvir_msg *)msg, false) != 0) {
@@ -1094,13 +1107,13 @@ static void tasvir_service_rpc_response(tasvir_msg_rpc *msg) {
 
 static void tasvir_service_mem(tasvir_msg_mem *msg) {
     // TODO: log_write and sync
-    /* static int i = 0;
-    if (i++ % 100 == 0)
-        TASVIR_LOG("%p %lu\n", msg->addr, msg->len); */
+    ttls.local->dstate.sync_stats_cur.cumbytes_rx += msg->len;
+    ttls.local->dstate.sync_stats_cur.cumpkts_rx++;
     tasvir_mov32blocks_stream(tasvir_data2shadow(msg->addr), msg->line, msg->len);
     tasvir_log_write(msg->addr, msg->len);
     if (!ttls.thread)
         tasvir_mov32blocks_stream(msg->addr, msg->line, msg->len);
+    rte_mempool_put(ttls.local->mp, (void *)msg);
 }
 
 static void tasvir_service_msg(tasvir_msg *msg) {
@@ -1125,15 +1138,16 @@ static void tasvir_service_port() {
     tasvir_msg *msg[TASVIR_RING_SIZE];
     unsigned int count, i, retval;
 
-    count = rte_eth_rx_burst(ttls.local->dstate.port_id, 0, (struct rte_mbuf **)msg, TASVIR_RING_SIZE);
-    for (i = 0; i < count; i++) {
-        tasvir_service_msg(msg[i]);
+    while ((count = rte_eth_rx_burst(ttls.local->dstate.port_id, 0, (struct rte_mbuf **)msg, TASVIR_RING_SIZE)) > 0) {
+        for (i = 0; i < count; i++) {
+            tasvir_service_msg(msg[i]);
+        }
     }
 
     while ((count = rte_ring_sc_dequeue_burst(ttls.local->ring_ext_tx, (void **)msg, TASVIR_RING_SIZE, NULL)) > 0) {
         for (i = 0; i < count; i++) {
             struct ether_hdr *eh = &msg[i]->eh;
-            ether_addr_copy(&msg[i]->dst_id.nid.mac_addr, &eh->d_addr);
+            ether_addr_copy(&msg[i]->dst_tid.nid.mac_addr, &eh->d_addr);
             ether_addr_copy(&ttls.local->dstate.mac_addr, &eh->s_addr);
             eh->ether_type = rte_cpu_to_be_16(TASVIR_ETH_PROTO);
         }
@@ -1194,19 +1208,17 @@ static inline void tasvir_schedule_sync(tasvir_area_desc *d) {
     }
 }
 
-static inline size_t tasvir_walk_areas(tasvir_area_desc *d, tasvir_area_desc_cb_fnptr fnptr) {
-    size_t bytes = 0;
+static inline void tasvir_walk_areas(tasvir_area_desc *d, tasvir_area_desc_cb_fnptr fnptr) {
     if (d->type == TASVIR_AREA_TYPE_CONTAINER) {
         tasvir_area_container *c = (tasvir_area_container *)d->h->data;
         for (size_t i = 0; i < c->nr_areas; i++)
-            bytes += tasvir_walk_areas(&c->descs[i], fnptr);
+            tasvir_walk_areas(&c->descs[i], fnptr);
     }
     fnptr(d);
-    return bytes;
 }
 
+// FIXME: expects len to be aligned
 static inline size_t tasvir_sync_job_helper_copy(uint8_t *src, tasvir_log_t *log_internal, size_t len, bool is_owner) {
-    // FIXME: expects len to be aligned
     size_t nbits0 = 0;
     size_t nbits1 = 0;
     size_t nbits1_seen = 0;
@@ -1252,16 +1264,20 @@ static inline size_t tasvir_sync_job_helper_copy(uint8_t *src, tasvir_log_t *log
 
         if (nbits_unit_left == 0) {
             nbits_unit_left = TASVIR_MIN(TASVIR_LOG_UNIT_BITS, nbits_total - nbits_seen);
-            *log_internal |= *log;
-            log_internal++;
+            if (log_internal) {
+                *log_internal |= *log;
+                log_internal++;
+            }
             *log = 0;
             log++;
             log_val = *log;
         }
     }
+
     if (nbits1 > 0) {
         tasvir_mov32blocks_stream(dst, src, nbits1 << TASVIR_SHIFT_BIT);
     }
+
     return nbits1_seen << TASVIR_SHIFT_BIT;
 }
 
@@ -1270,8 +1286,8 @@ static inline void tasvir_sync_job_run(tasvir_sync_job *j) {
 
     /* FIXME: find the more recent desc */
     tasvir_area_desc *d = j->d->owner != NULL ? j->d : tasvir_data2shadow(j->d);
-    uint16_t tid_owner = tasvir_is_thread_local(d->owner) ? d->owner->id.idx : 0;
-    bool is_owner = tid_owner == ttls.thread->id.idx;
+    bool is_local = tasvir_is_thread_local(d->owner);
+    bool is_owner = is_local && d->owner->tid.idx == ttls.thread->tid.idx;
     tasvir_area_header *h = is_owner ? d->h : tasvir_data2shadow(d->h);
 
     if (h->d != j->d)
@@ -1279,18 +1295,22 @@ static inline void tasvir_sync_job_run(tasvir_sync_job *j) {
 
     /* special case for syncing root desc because it is an orphan */
     if (d == ttls.root_desc && j->offset == 0) {
-        bytes = tasvir_sync_job_helper_copy((uint8_t *)j->d, h->diff_log[0].data,
-                                            TASVIR_ALIGN(sizeof(tasvir_area_desc)), is_owner);
+        // FIXME: no internal log to capture root desc changes?
+        bytes = tasvir_sync_job_helper_copy((uint8_t *)j->d, NULL, TASVIR_ALIGN(sizeof(tasvir_area_desc)), is_owner);
     }
 
     bytes += tasvir_sync_job_helper_copy((uint8_t *)d->h + j->offset,
-                                         h->diff_log[0].data + (j->offset >> TASVIR_SHIFT_UNIT), j->len, is_owner);
+                                         is_local ? h->diff_log[0].data + (j->offset >> TASVIR_SHIFT_UNIT) : NULL,
+                                         j->len, is_owner);
 
-    if (bytes > 0) {
+    if (bytes > 0 && is_local) {
         /* race doesn't matter because everyone is trying to update version to the same value */
-        h = tasvir_data2shadow(d->h);
-        d->h->version = h->version = d->h->diff_log[0].version_end = h->diff_log[0].version_end = j->old_version + 1;
-        d->h->update_us = h->update_us = d->h->diff_log[0].ts_last_us = h->diff_log[0].ts_last_us = ttls.local->time_us;
+        tasvir_area_header *h2 = is_owner ? tasvir_data2shadow(d->h) : d->h;
+        tasvir_log_write(&h->version, sizeof(h->update_us) + sizeof(h->update_us));
+        h->version = h->diff_log[0].version_end = h2->diff_log[0].version_end = j->old_version + 1;
+        h->update_us = h->diff_log[0].ts_last_us = h2->diff_log[0].ts_last_us = ttls.local->time_us;
+        // FIXME: must change this if version and update_us were not consecutive
+        bytes += tasvir_sync_job_helper_copy((uint8_t *)d->h, h->diff_log[0].data, j->len, is_owner);
         /* tasvir_memset_stream(tasvir_data2log((uint8_t *)d->h + j->offset), 0, j->len >> TASVIR_SHIFT_BYTE); */
     }
 
@@ -1337,7 +1357,8 @@ static inline void tasvir_sync_prep() {
 
 static inline void tasvir_sync_rotate_logs(tasvir_area_desc *d) {
     int i;
-    uint64_t delta_us[3] = {500 * 1000, 15 * 1000 * 1000, 30 * 1000 * 1000};
+    const uint64_t MS = 1000;
+    uint64_t delta_us[3] = {500 * MS, 15000 * MS, 30000 * MS};
     for (i = TASVIR_NR_AREA_LOGS - 2; i >= 0; i--) {
         tasvir_area_log *log = &d->h->diff_log[i];
         tasvir_area_log *log_next = &d->h->diff_log[i + 1];
@@ -1370,8 +1391,8 @@ static inline void tasvir_msg_mem_generate(void *addr, size_t len, bool is_owner
 
     while (len > 0) {
         m = msg[i];
-        m->h.src_id = ttls.thread->id;
-        m->h.dst_id = ttls.update_dst_id;
+        m->h.src_tid = ttls.thread->tid;
+        m->h.dst_tid = ttls.local->dstate.update_tid;
         m->h.id = ttls.nr_msgs++;
         m->h.type = TASVIR_MSG_TYPE_MEM;
         m->h.time_us = ttls.local->time_us;
@@ -1412,9 +1433,10 @@ static inline void tasvir_msg_mem_generate(void *addr, size_t len, bool is_owner
     }
 }
 
-static inline void tasvir_sync_area_external(tasvir_area_desc *d, bool boot) {
-    if (!d || !d->owner || !tasvir_is_thread_local(d->owner) || d->h->diff_log[0].version_end == 0)
-        return;
+static inline size_t tasvir_sync_area_external_boot(tasvir_area_desc *d, bool boot) {
+    if (!d || !d->owner || !tasvir_is_thread_local(d->owner) || d->h->diff_log[0].version_end == 0) {
+        return 0;
+    }
 
     int i;
     size_t len;
@@ -1441,17 +1463,22 @@ static inline void tasvir_sync_area_external(tasvir_area_desc *d, bool boot) {
 
     uint8_t *src = (uint8_t *)d->h;
     int pivot = 0;
-    tasvir_log_t *log[4];
-    for (i = 0; i < 4; i++) {
-        log[i] = is_owner ? d->h->diff_log[i].data : tasvir_data2shadow(d->h->diff_log[i].data);
-        if (!boot && d->h->diff_log[i].ts_last_us - ttls.local->time_us > TASVIR_SYNC_EXTERNAL_US) {
+    tasvir_log_t *log[TASVIR_NR_AREA_LOGS];
+    tasvir_log_t log_val = 0;
+
+    // FIXME: latter is a heuristic for boot time
+    bool force = boot || ttls.local->time_us - ttls.node_desc->boot_us < 5000 * 1000;
+
+    for (pivot = 0; pivot < TASVIR_NR_AREA_LOGS; pivot++) {
+        if (!force && ttls.local->time_us - d->h->diff_log[pivot].ts_last_us > TASVIR_SYNC_EXTERNAL_US) {
             break;
         }
-        pivot++;
+        log[pivot] = is_owner ? d->h->diff_log[pivot].data : tasvir_data2shadow(d->h->diff_log[pivot].data);
+        log_val |= *log[pivot];
     }
-    tasvir_log_t log_val = 0;
-    for (i = 0; i < pivot; i++)
-        log_val |= *log[i];
+
+    if (pivot == 0)
+        return 0;
 
     while (nbits_total > nbits_seen) {
         nbits_same = _lzcnt_u64(log_val);
@@ -1490,10 +1517,15 @@ static inline void tasvir_sync_area_external(tasvir_area_desc *d, bool boot) {
             }
         }
     }
+
     if (nbits1 > 0) {
         tasvir_msg_mem_generate(src, nbits1 << TASVIR_SHIFT_BIT, is_owner);
     }
+
+    return nbits1_seen << TASVIR_SHIFT_BIT;
 }
+
+static inline size_t tasvir_sync_area_external(tasvir_area_desc *d) { return tasvir_sync_area_external_boot(d, false); }
 
 static inline void tasvir_sync_external() {
     tasvir_local_dstate *dstate = &ttls.local->dstate;
@@ -1512,7 +1544,7 @@ static inline size_t tasvir_sync() {
     if (!ttls.thread)
         return 0;
 
-    tasvir_local_tstate *tstate = &ttls.local->tstate[ttls.thread->id.idx];
+    tasvir_local_tstate *tstate = &ttls.local->tstate[ttls.thread->tid.idx];
     if (!tstate->sync)
         return 0;
     tasvir_local_dstate *dstate = &ttls.local->dstate;
@@ -1564,27 +1596,49 @@ void tasvir_sync_stats_reset() {
     memset(&ttls.local->dstate.sync_stats_cur, 0, sizeof(tasvir_sync_stats));
 }
 
+static inline void tasvir_print_area(tasvir_area_desc *d) {
+    TASVIR_LOG("name=%s owner=%p version=%lu update_us=%lu\n", d->name, (void *)d->owner, d->h ? d->h->version : 0,
+               d->h ? d->h->update_us : 0);
+}
+
 static inline void tasvir_update_stats() {
     if (ttls.local->time_us - ttls.local->dstate.last_stat < TASVIR_STAT_US)
         return;
 
+    uint64_t MS = 1 * 1000;  // in us
+    uint64_t S = MS * 1000;  // in us
+    uint64_t interval_us = ttls.local->time_us - ttls.local->dstate.last_stat;
     ttls.local->dstate.last_stat = ttls.local->time_us;
-    if (ttls.local->dstate.sync_stats_cur.count == 0)
+
+    tasvir_sync_stats *cur = &ttls.local->dstate.sync_stats_cur;
+    tasvir_sync_stats *avg = &ttls.local->dstate.sync_stats;
+    if (cur->count == 0)
         return;
 
-    TASVIR_LOG("sync count %lu time %luus copied %lukB time/sync %luus copied/sync %lukB\n",
-               ttls.local->dstate.sync_stats_cur.count, ttls.local->dstate.sync_stats_cur.cumtime_us,
-               ttls.local->dstate.sync_stats_cur.cumbytes / 1000,
-               ttls.local->dstate.sync_stats_cur.cumtime_us / ttls.local->dstate.sync_stats_cur.count,
-               ttls.local->dstate.sync_stats_cur.cumbytes / (1000 * ttls.local->dstate.sync_stats_cur.count));
+    TASVIR_LOG(
+        "syncs/s=%lu synctime/s=%luus change/s=%lukB rx/s=%lukB|%lupps "
+        "time/sync=%luus kB/sync=%lukB \n",
+        S * cur->count / interval_us, S * cur->cumtime_us / interval_us, MS * cur->cumbytes / interval_us,
+        MS * cur->cumbytes_rx / interval_us, S * cur->cumpkts_rx / interval_us, cur->cumtime_us / cur->count,
+        cur->cumbytes / cur->count / 1000);
 
-    ttls.local->dstate.sync_stats.count += ttls.local->dstate.sync_stats_cur.count;
-    ttls.local->dstate.sync_stats.cumtime_us += ttls.local->dstate.sync_stats_cur.cumtime_us;
-    ttls.local->dstate.sync_stats.cumbytes += ttls.local->dstate.sync_stats_cur.cumbytes;
+    avg->count += cur->count;
+    avg->cumtime_us += cur->cumtime_us;
+    avg->cumbytes += cur->cumbytes;
+    avg->cumbytes_rx += cur->cumbytes_rx;
+    avg->cumpkts_rx += cur->cumpkts_rx;
 
-    ttls.local->dstate.sync_stats_cur.count = 0;
-    ttls.local->dstate.sync_stats_cur.cumtime_us = 0;
-    ttls.local->dstate.sync_stats_cur.cumbytes = 0;
+    cur->count = 0;
+    cur->cumtime_us = 0;
+    cur->cumbytes = 0;
+    cur->cumbytes_rx = 0;
+    cur->cumpkts_rx = 0;
+
+    struct rte_eth_stats s;
+    rte_eth_stats_get(0, &s);
+    TASVIR_LOG("i:p=%lu b=%lu e=%lu m=%lu n=%lu\n", s.ipackets, s.ibytes, s.ierrors, s.imissed, s.rx_nombuf);
+    TASVIR_LOG("o:p=%lu b=%lu e=%lu\n", s.opackets, s.obytes, s.oerrors);
+    // tasvir_walk_areas(ttls.root_desc, &tasvir_print_area);
 }
 
 static inline void tasvir_service_daemon() {
@@ -1612,8 +1666,8 @@ static inline void tasvir_service_daemon() {
 static inline void tasvir_service_client() {
     /* service rings */
     if (likely(ttls.thread != NULL))
-        ttls.local->tstate[ttls.thread->id.idx].update_us = ttls.local->time_us;
-    uint16_t tid = ttls.thread ? ttls.thread->id.idx : TASVIR_THREAD_DAEMON_IDX;
+        ttls.local->tstate[ttls.thread->tid.idx].update_us = ttls.local->time_us;
+    uint16_t tid = ttls.thread ? ttls.thread->tid.idx : TASVIR_THREAD_DAEMON_IDX;
     tasvir_service_ring(ttls.local->tstate[tid].ring_rx);
 }
 

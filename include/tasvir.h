@@ -28,7 +28,7 @@ typedef unsigned long tasvir_arg_promo_t;
 #define TASVIR_STAT_US (1 * 1000 * 1000)     /* stat interval */
 #define TASVIR_BARRIER_ENTER_US (1000)       /* max time to enter sync */
 #define TASVIR_BARRIER_EXIT_US (500)         /* max gap between slowest and fastest thread */
-#define TASVIR_HEARTBEAT_US (100 * 1000)     /* timer to announce a thread dead */
+#define TASVIR_HEARTBEAT_US (200 * 1000)     /* timer to announce a thread dead */
 
 #define TASVIR_SYNC_JOB_BYTES (size_t)(1 << 20) /* max size of each job */
 #define TASVIR_NR_SYNC_JOBS (1024)
@@ -44,7 +44,7 @@ typedef unsigned long tasvir_arg_promo_t;
 #define TASVIR_NR_NODES_AREA (64)
 #define TASVIR_NR_SOCKETS (2)
 #define TASVIR_NR_THREADS_LOCAL (64)
-#define TASVIR_RING_SIZE (512)
+#define TASVIR_RING_SIZE (64)
 #define TASVIR_THREAD_DAEMON_IDX (0)
 
 #define __TASVIR_LOG2(x) (31 - __builtin_clz(x | 1))
@@ -54,7 +54,6 @@ typedef unsigned long tasvir_arg_promo_t;
 #define TASVIR_SHIFT_BYTE (TASVIR_SHIFT_BIT + __TASVIR_LOG2(CHAR_BIT))
 #define TASVIR_SHIFT_UNIT (TASVIR_SHIFT_BYTE + __TASVIR_LOG2(sizeof(tasvir_log_t)))
 #define TASVIR_ALIGNMENT (uintptr_t)(1 << TASVIR_SHIFT_UNIT)
-/*#define TASVIR_ALIGNMENT (uintptr_t)(TASVIR_SHIFT_UNIT >= 12 ? (1 << TASVIR_SHIFT_UNIT) : 4096) */
 #define TASVIR_ALIGNX(x, a) ((uintptr_t)(x + a - 1) & ~(a - 1))
 #define TASVIR_ALIGN(x) TASVIR_ALIGNX((uintptr_t)x, TASVIR_ALIGNMENT)
 #define TASVIR_SIZE_DATA (size_t) TASVIR_ALIGN((4UL << 40)) /* must be a power of two; 4TB */
@@ -176,8 +175,8 @@ struct tasvir_msg {
     struct rte_mbuf mbuf;
     uint8_t pad_[RTE_PKTMBUF_HEADROOM];
     struct ether_hdr eh;
-    tasvir_tid src_id;
-    tasvir_tid dst_id;
+    tasvir_tid src_tid;
+    tasvir_tid dst_tid;
     tasvir_msg_type type;
     uint16_t id;
     uint64_t time_us;
@@ -206,7 +205,7 @@ struct tasvir_rpc_status {
 };
 
 struct tasvir_thread {
-    tasvir_tid id;
+    tasvir_tid tid;
     uint16_t core;
     tasvir_thread_type type;
     tasvir_thread_status status;
@@ -268,11 +267,17 @@ struct tasvir_sync_stats {
     uint64_t count;
     uint64_t cumtime_us;
     uint64_t cumbytes;
+    uint64_t cumbytes_rx;
+    uint64_t cumpkts_rx;
 };
 
 struct tasvir_local_dstate { /* daemon state */
     struct ether_addr mac_addr;
     uint8_t port_id;
+
+    tasvir_tid update_tid;
+    tasvir_tid broadcast_tid;
+    tasvir_tid nodecast_tid;
 
     uint64_t last_stat;
     uint64_t last_sync_start;
@@ -301,10 +306,6 @@ struct tasvir_tls_state { /* thread-internal state */
     tasvir_node *node;
     tasvir_thread *thread;
 
-    tasvir_tid update_dst_id;
-    tasvir_tid any_dst_id;
-    tasvir_tid any_src_id;
-
     bool is_root;
     bool is_daemon;
     uint16_t nr_msgs;
@@ -331,7 +332,7 @@ struct tasvir_local {
 } __attribute__((aligned(8)));
 
 struct tasvir_node {
-    tasvir_nid id;
+    tasvir_nid nid;
     uint32_t heartbeat_us;
     size_t nr_threads;
     tasvir_thread threads[TASVIR_NR_THREADS_LOCAL];
