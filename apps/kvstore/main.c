@@ -157,8 +157,8 @@ int main(int argc, char *argv[]) {
 
     // FIXME: What units is this size in? I think it is in GB, cannot allocate 2 GB, not sure why.
     // Set up a 2GB area
-    /*const size_t AREA_SIZE = 2 * 1024 * 1024 * 1024;*/
-    const size_t AREA_SIZE = 100 * 1024 * 1024;
+    const size_t AREA_SIZE = 2ull * 1024ull * 1024ull * 1024ull;
+    /*const size_t AREA_SIZE = 100 * 1024 * 1024;*/
 
     struct kv_test args;
 
