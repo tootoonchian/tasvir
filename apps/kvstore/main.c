@@ -157,7 +157,7 @@ int main(int argc, char *argv[]) {
 
     // FIXME: What units is this size in? I think it is in GB, cannot allocate 2 GB, not sure why.
     // Set up a 2GB area
-    const size_t AREA_SIZE = 2ull * 1024ull * 1024ull * 1024ull;
+    const size_t AREA_SIZE = 1ull * 1024ull * 1024ull * 1024ull;
     /*const size_t AREA_SIZE = 100 * 1024 * 1024;*/
 
     struct kv_test args;
@@ -187,12 +187,13 @@ int main(int argc, char *argv[]) {
     assert(d != MAP_FAILED);
     uint8_t *data = d->h->data;
     void *dict = data;
-    void *entry = (void *)(data + 25 * 1024 * 1024);
-    void *key = (void *)(data +  50 * 1024 * 1024);
-    void *val = (void *)(data + 75 * 1024 * 1024);
+    const size_t REGION_SIZE = 250ull * 1024ull * 1024ull;
+    void *entry = (void *)(data + REGION_SIZE);
+    void *key = (void *)(data +  2ull * REGION_SIZE);
+    void *val = (void *)(data + 3ull * REGION_SIZE);
     dictWrapper *w =
-        initDictWrapper(dict, 1024 * 1024, entry, 1024 * 1024, key, KEY_SIZE, 1024 * 1024, 
-                val, VALUE_SIZE, 1024 * 1024);
+        initDictWrapper(dict, REGION_SIZE, entry, REGION_SIZE, key, KEY_SIZE, REGION_SIZE, 
+                val, VALUE_SIZE, REGION_SIZE);
     read_load(&args, w);
     // FIXME: Synchronize here waiting for all the other servers to finish loading.
     read_access(&args, w);
