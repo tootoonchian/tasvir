@@ -30,8 +30,8 @@ typedef unsigned long tasvir_arg_promo_t;
 #define TASVIR_BARRIER_EXIT_US (500)         /* max gap between slowest and fastest thread */
 #define TASVIR_HEARTBEAT_US (200 * 1000)     /* timer to announce a thread dead */
 
-#define TASVIR_SYNC_JOB_BYTES (size_t)(1 << 20) /* max size of each job */
-#define TASVIR_NR_SYNC_JOBS (1024)
+#define TASVIR_SYNC_JOB_BYTES (size_t)(1 << 21) /* max size of each job */
+#define TASVIR_NR_SYNC_JOBS (2048)
 #define TASVIR_HUGEPAGE_SIZE (size_t)(2 << 20)
 #define TASVIR_ETH_PROTO (0x88b6)
 #define TASVIR_STRLEN_MAX (32)
@@ -379,10 +379,10 @@ static inline void tasvir_log_write(void *data, size_t len) {
     tasvir_log_t *data_end_log = tasvir_data2log(data_end);
     uint64_t bit_start = tasvir_data2log_bit_offset(data);
     uint64_t bit_end = tasvir_data2log_bit_offset(data_end);
-    /*
+    
     fprintf(stderr, "%14d %-22.22s %p-%p (%luB) log:%p-%p bit:%lu-%lu\n", 0, "tasvir_log_write", data, data_end, len,
             (void *)log, (void *)data_end_log, bit_start, bit_end);
-    */
+    
 
     if (log == data_end_log) {
         *log |= (~0UL >> bit_start) & ((1L << 63) >> bit_end);
