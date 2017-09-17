@@ -109,8 +109,8 @@ void read_load(struct kv_test *args, dictWrapper *w) {
         char *value = strtok(NULL, " ");
         assert(strcmp(op, "UPDATE") == 0);
         update(w, key, value);
+        tasvir_service();
     }
-    tasvir_service();
     free(buf);
 }
 
