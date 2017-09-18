@@ -10,6 +10,7 @@
 #include "tasvir.h"
 #define __unused __attribute__((__unused__))
 /*#define _ALLOC_TEST_*/
+#define CONSISTENCY 1
 
 #ifdef _ALLOC_TEST_
 struct Test {
@@ -41,6 +42,20 @@ struct kv_test {
     char *load_log;
 };
 
+enum kvop {
+    GET,
+    UPDATE
+};
+
+struct operation {
+    int server;
+    enum kvop op;
+    char *key;
+    char *value;
+    char *line;
+    struct operation *next;
+};
+
 int parse_args(int argc, char* argv[], struct kv_test *out) {
     int c;
     while((c = getopt(argc, argv, "s:n:a:l:")) != -1) {
@@ -65,13 +80,38 @@ int parse_args(int argc, char* argv[], struct kv_test *out) {
     return 1;
 }
 
+struct operation *parse_line(char *line, ssize_t len) {
+    char *out, *op, *key;
+    struct operation *entry = malloc(sizeof(struct operation));
+    entry->next = NULL;
+    line[len - 1] = 0;
+    entry->line = line;
+    out = strtok(line, " ");
+    entry->server = atoi(out);
+    op = strtok(NULL, " ");
+    key = strtok(NULL, " ");
+    if (strcmp(op, "UPDATE") == 0) {
+        entry->op = UPDATE;
+        entry->key = key;
+        entry->value = strtok(NULL, " ");
+    } else if (strcmp(op, "GET") == 0) {
+        entry->op = GET;
+        entry->key = key;
+        entry->value = NULL;
+    } else {
+        free(entry);
+        entry = NULL;
+    }
+    return entry;
+}
+
 inline void update(dictWrapper *w, char *key, char *value) {
     char *dictKey = allocKey(w, key);
     void *dictVal = allocVal(w, value, strlen(value));
+#ifndef CONSISTENCY
     printf("wrote \"%s\"\n", key);
+#endif
     dictReplace(w->d, dictKey, dictVal);
-    dictEntry *de = dictFind(w->d, key);
-    assert(de != NULL);
 }
 
 inline void get(dictWrapper *w, char *key) {
@@ -81,72 +121,92 @@ inline void get(dictWrapper *w, char *key) {
         key[len-1] = 0;
     }
     de = dictFind(w->d, key);
+#ifndef CONSISTENCY
     if (de != NULL) {
-        printf("%s %s\n", key, de->v.val); 
+        printf("%s %s\n", key, de->v.val);
     } else {
         printf("not found \"%s\"\n", key);
     }
+#endif
 }
 
-void read_load(struct kv_test *args, dictWrapper *w) {
-    FILE *file = fopen(args->load_log, "r");
-    if (file == NULL) {
-        perror("fopen");
-        return;
-    }
+struct operation *parse_file(char *path) {
     char *buf = NULL;
     ssize_t nread;
     size_t len = 0;
-    while ((nread = getline(&buf, &len, file)) > 0) {
-        buf[nread - 1] = 0;
-        char *out = strtok(buf, " ");
-        int server = atoi(out);
-        if (server != args->id) {
-            continue;
-        }
-        char *op = strtok(NULL, " ");
-        char *key = strtok(NULL, " ");
-        char *value = strtok(NULL, " ");
-        assert(strcmp(op, "UPDATE") == 0);
-        update(w, key, value);
-        tasvir_service();
-    }
-    free(buf);
-}
-
-void read_access(struct kv_test *args, dictWrapper *w) {
-    FILE *file = fopen(args->access_log, "r");
-    struct timespec start = {0, 0}, current = {0, 0};
-    clock_gettime(CLOCK_MONOTONIC, &start);
+    struct operation *head = NULL;
+    struct operation *current = NULL;
+    FILE *file = fopen(path, "r");
     if (file == NULL) {
+        printf("Could not open %s\n", path);
         perror("fopen");
-        return;
+        return NULL;
     }
-    char *buf = NULL;
-    ssize_t nread;
-    size_t len = 0;
-    while ((nread = getline(&buf, &len, file)) > 0) {
+    while ((nread = getline(&buf, &len, file)) >= 0) {
+        struct operation *parsed = NULL;
         buf[nread - 1] = 0;
-        char *out = strtok(buf, " ");
-        int server = atoi(out);
-        char *op = strtok(NULL, " ");
-        char *key = strtok(NULL, " ");
-        if (strcmp(op, "UPDATE") == 0) {
-            if (server != args->id) {
-                continue;
+        parsed = parse_line(buf, nread);
+        if (parsed) {
+            if (current) {
+                current->next = parsed;
+                current = parsed;
+            } else {
+                current = parsed;
+                head = parsed;
             }
-            char *value = strtok(NULL, " ");
-            update(w, key, value);
-        } else if (strcmp(op, "GET") == 0) {
-            // FIXME: Sample this when testing throughput, reading clock is slow.
-            clock_gettime(CLOCK_MONOTONIC, &current);
-            printf("%lu %lu ", current.tv_sec - start.tv_sec, current.tv_nsec- start.tv_nsec);
-            // FIXME: Use server to select correct w
-            get(w, key);
         }
+        buf = NULL;
+        len = 0;
+    }
+    return head;
+}
+
+void free_operation_list(struct operation *list) {
+    while (list) {
+        struct operation *temp = list;
+        free(temp->line);
+        list = list->next;
+    }
+}
+
+struct operation *parse_load_file(struct kv_test *args) {
+    return parse_file(args->load_log);
+}
+
+struct operation *parse_access_file(struct kv_test *args) {
+    return parse_file(args->access_log);
+}
+
+void load_data(struct kv_test *args, struct operation *loads, dictWrapper *w) {
+    struct operation *current = loads;
+    while (current) {
+        assert(current->op == UPDATE);
+        if (current->server == args->id) {
+            update(w, current->key, current->value);
+        }
+        current = current->next;
         tasvir_service();
     }
-    free(buf);
+}
+
+void run_access(struct kv_test *args, struct operation *acs, dictWrapper *w) {
+    struct operation *current = acs;
+    while (current) {
+        if (current->op == UPDATE) {
+            if (current->server == args->id) {
+                update(w, current->key, current->value);
+            }
+        } else if (current->op == GET) {
+#ifndef CONSISTENCY
+            struct timespec current_time = {0, 0};
+            clock_gettime(CLOCK_MONOTONIC, &current_time);
+            printf("%lu %lu ", current_time.tv_sec, current_time.tv_nsec);
+#endif
+            get(w, current->key);
+        }
+        current = current->next;
+        tasvir_service();
+    }
 }
 
 int main(int argc, char *argv[]) {
@@ -159,15 +219,33 @@ int main(int argc, char *argv[]) {
     // Set up a 2GB area
     const size_t AREA_SIZE = 1ull * 1024ull * 1024ull * 1024ull;
     /*const size_t AREA_SIZE = 100 * 1024 * 1024;*/
+    const size_t REGION_SIZE = 250ull * 1024ull * 1024ull;
 
     struct kv_test args;
 
     tasvir_area_desc param;
     tasvir_area_desc *d = NULL;
-    tasvir_area_desc *root_desc = tasvir_init(TASVIR_THREAD_TYPE_APP, 0, NULL);
-
+    struct operation *load_log = NULL;
+    struct operation *access_log = NULL;
+    tasvir_area_desc *root_desc = NULL;
     char area_name[32];
+    uint8_t *data = NULL;
+    void *dict = NULL;
+    void *entry = NULL;
+    void *key = NULL;
+    void *val = NULL;
+    struct timespec start = {0, 0};
+    struct timespec end = {0, 0};
+    dictWrapper *w = NULL;
+
     parse_args(argc, argv, &args);
+    load_log = parse_load_file(&args);
+    access_log = parse_access_file(&args);
+    assert(load_log);
+    assert(access_log);
+
+    root_desc = tasvir_init(TASVIR_THREAD_TYPE_APP, 0, NULL);
+
     if (root_desc == MAP_FAILED) {
         printf("test_ctrl: tasvir_init failed\n");
         return -1;
@@ -185,17 +263,24 @@ int main(int argc, char *argv[]) {
 
     // FIXME: Change these sizes to be real once 2G is fixed.
     assert(d != MAP_FAILED);
-    uint8_t *data = d->h->data;
-    void *dict = data;
-    const size_t REGION_SIZE = 250ull * 1024ull * 1024ull;
-    void *entry = (void *)(data + REGION_SIZE);
-    void *key = (void *)(data +  2ull * REGION_SIZE);
-    void *val = (void *)(data + 3ull * REGION_SIZE);
-    dictWrapper *w =
-        initDictWrapper(dict, REGION_SIZE, entry, REGION_SIZE, key, KEY_SIZE, REGION_SIZE, 
+    data = d->h->data;
+    dict = data;
+    entry = (void *)(data + REGION_SIZE);
+    key = (void *)(data +  2ull * REGION_SIZE);
+    val = (void *)(data + 3ull * REGION_SIZE);
+    w = initDictWrapper(dict, REGION_SIZE, entry, REGION_SIZE, key, KEY_SIZE, REGION_SIZE,
                 val, VALUE_SIZE, REGION_SIZE);
-    read_load(&args, w);
+    printf("Starting to load data\n");
+    load_data(&args, load_log, w);
+    printf("Done loading data\n");
     // FIXME: Synchronize here waiting for all the other servers to finish loading.
-    read_access(&args, w);
+    // Begin measuring.
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    run_access(&args, access_log, w);
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    printf("Done running operations took %lu sec %lu ns\n",
+            end.tv_sec - start.tv_sec, end.tv_nsec - start.tv_nsec);
+    free_operation_list(load_log);
+    free_operation_list(access_log);
 
 }

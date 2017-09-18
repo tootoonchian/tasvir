@@ -380,8 +380,10 @@ static inline void tasvir_log_write(void *data, size_t len) {
     uint64_t bit_start = tasvir_data2log_bit_offset(data);
     uint64_t bit_end = tasvir_data2log_bit_offset(data_end);
     
+    /*
     fprintf(stderr, "%14d %-22.22s %p-%p (%luB) log:%p-%p bit:%lu-%lu\n", 0, "tasvir_log_write", data, data_end, len,
             (void *)log, (void *)data_end_log, bit_start, bit_end);
+    */
     
 
     if (log == data_end_log) {
