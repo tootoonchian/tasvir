@@ -10,7 +10,8 @@
 #include "tasvir.h"
 #define __unused __attribute__((__unused__))
 /*#define _ALLOC_TEST_*/
-#define CONSISTENCY 1
+#define CONSISTENCY 0
+/*#define CONSISTENCY 1*/
 
 #ifdef _ALLOC_TEST_
 struct Test {
@@ -55,6 +56,12 @@ struct operation {
     char *line;
     struct operation *next;
 };
+
+static inline void wrap_service() {
+#if !(NO_SERVICE)
+    tasvir_service();
+#endif
+}
 
 int parse_args(int argc, char* argv[], struct kv_test *out) {
     int c;
@@ -108,7 +115,7 @@ struct operation *parse_line(char *line, ssize_t len) {
 inline void update(dictWrapper *w, char *key, char *value) {
     char *dictKey = allocKey(w, key);
     void *dictVal = allocVal(w, value, strlen(value));
-#ifndef CONSISTENCY
+#if CONSISTENCY
     printf("wrote \"%s\"\n", key);
 #endif
     dictReplace(w->d, dictKey, dictVal);
@@ -121,7 +128,7 @@ inline void get(dictWrapper *w, char *key) {
         key[len-1] = 0;
     }
     de = dictFind(w->d, key);
-#ifndef CONSISTENCY
+#if CONSISTENCY
     if (de != NULL) {
         printf("%s %s\n", key, de->v.val);
     } else {
@@ -185,7 +192,7 @@ void load_data(struct kv_test *args, struct operation *loads, dictWrapper *w) {
             update(w, current->key, current->value);
         }
         current = current->next;
-        tasvir_service();
+        wrap_service();
     }
 }
 
@@ -197,7 +204,7 @@ void run_access(struct kv_test *args, struct operation *acs, dictWrapper *w) {
                 update(w, current->key, current->value);
             }
         } else if (current->op == GET) {
-#ifndef CONSISTENCY
+#if CONSISTENCY
             struct timespec current_time = {0, 0};
             clock_gettime(CLOCK_MONOTONIC, &current_time);
             printf("%lu %lu ", current_time.tv_sec, current_time.tv_nsec);
@@ -205,7 +212,7 @@ void run_access(struct kv_test *args, struct operation *acs, dictWrapper *w) {
             get(w, current->key);
         }
         current = current->next;
-        tasvir_service();
+        wrap_service();
     }
 }
 

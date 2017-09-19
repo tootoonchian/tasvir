@@ -1,5 +1,17 @@
 #add_tasvir_instrumented_exec(tasvir_benchmark benchmark.cpp)
 file(GLOB kv_sources . *.c)
 add_tasvir_exec(kvstore ${kv_sources})
-set_property(TARGET kvstore PROPERTY C_STANDARD 99)
+set_property(TARGET kvstore PROPERTY C_STANDARD 11)
+target_compile_definitions(kvstore PRIVATE NO_LOG=0 NO_SERVICE=0) 
 
+add_tasvir_exec(kvstore-nolog ${kv_sources})
+set_property(TARGET kvstore-nolog PROPERTY C_STANDARD 11)
+target_compile_definitions(kvstore-nolog PRIVATE NO_LOG=1 NO_SERVICE=0)
+
+add_tasvir_exec(kvstore-nosync ${kv_sources})
+set_property(TARGET kvstore-nosync PROPERTY C_STANDARD 11)
+target_compile_definitions(kvstore-nosync PRIVATE NO_LOG=0 NO_SERVICE=1)
+
+add_tasvir_exec(kvstore-nothing ${kv_sources})
+set_property(TARGET kvstore-nothing PROPERTY C_STANDARD 11)
+target_compile_definitions(kvstore-nothing PRIVATE NO_LOG=1 NO_SERVICE=1)
