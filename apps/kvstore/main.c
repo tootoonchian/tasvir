@@ -273,6 +273,19 @@ static inline void await_barrier(uint64_t *var, const uint64_t val) {
     }
 }
 
+inline void timespec_diff(struct timespec *start, struct timespec *stop,
+                   struct timespec *result) {
+    if ((stop->tv_nsec - start->tv_nsec) < 0) {
+        result->tv_sec = stop->tv_sec - start->tv_sec - 1;
+        result->tv_nsec = stop->tv_nsec - start->tv_nsec + 1000000000;
+    } else {
+        result->tv_sec = stop->tv_sec - start->tv_sec;
+        result->tv_nsec = stop->tv_nsec - start->tv_nsec;
+    }
+
+    return;
+}
+
 static void *thread_code(void *init_struct) {
     struct thread_init *args = (struct thread_init*)init_struct;
     tasvir_area_desc param;
@@ -288,6 +301,7 @@ static void *thread_code(void *init_struct) {
     void *val = NULL;
     struct timespec start = {0, 0};
     struct timespec end = {0, 0};
+    struct timespec diff = {0, 0};
     dictWrapper *w[MAX_SERVERS] = {NULL};
     uint64_t *locks[MAX_SERVERS] = {NULL};
     int i = 0;
@@ -376,8 +390,9 @@ static void *thread_code(void *init_struct) {
     clock_gettime(CLOCK_MONOTONIC, &start);
     run_access(args->id, args->access_log, w, args->servers);
     clock_gettime(CLOCK_MONOTONIC, &end);
+    timespec_diff(&start, &end, &diff);
     printf("%d Done running operations took %lu sec %lu ns\n",
-            args->id, end.tv_sec - start.tv_sec, end.tv_nsec - start.tv_nsec);
+            args->id, diff.tv_sec, diff.tv_nsec);
     return NULL;
 }
 
