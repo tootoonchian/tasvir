@@ -816,7 +816,7 @@ tasvir_area_desc *tasvir_lookup(tasvir_area_desc *pd, char *name) {
     }
 
     if (d == NULL) {
-        TASVIR_LOG("could not find area %s under %s\n", name, pd->name);
+        /*TASVIR_LOG("could not find area %s under %s\n", name, pd->name);*/
     }
 
     return d;
@@ -1654,8 +1654,8 @@ static inline void tasvir_service_daemon() {
             }
         }
     }
-    if (ttls.thread && ttls.thread->status == TASVIR_THREAD_STATUS_RUNNING)
-        tasvir_sync_external();
+    /*if (ttls.thread && ttls.thread->status == TASVIR_THREAD_STATUS_RUNNING)*/
+        /*tasvir_sync_external();*/
     tasvir_service_port();
     if (ttls.thread && ttls.thread->status == TASVIR_THREAD_STATUS_RUNNING) {
         tasvir_update_stats();

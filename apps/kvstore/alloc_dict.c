@@ -93,3 +93,9 @@ dictWrapper *initDictWrapper(void *space, size_t len, void *entrySpace, size_t e
     wrap_log_write(wrapper->d, sizeof(dict));
     return wrapper;
 }
+
+
+dictWrapper *subscribeDict(void *space) {
+    // This depends on address being same for diff regions.
+    return (dictWrapper*)space;
+}
