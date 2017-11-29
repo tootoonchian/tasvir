@@ -259,7 +259,7 @@ inline void cpu_relax() {
 #define MAX_SERVERS 4
 inline tasvir_area_desc *subscribe_region(char* area_name, tasvir_area_desc *root) {
     tasvir_area_desc *remote;
-    while ((remote = tasvir_attach(root, area_name, NULL)) == MAP_FAILED) {
+    while (!(remote = tasvir_attach(root, area_name, NULL))) {
         tasvir_service(); // Not wrapped since there is no way around this.
         cpu_relax();
     }
@@ -320,7 +320,7 @@ static void *thread_code(void *init_struct) {
 
     /* Step 0: Initialize our bit */
     root_desc = tasvir_init(TASVIR_THREAD_TYPE_APP, args->core, NULL);
-    if (root_desc == MAP_FAILED) {
+    if (!root_desc) {
         printf("test_ctrl: tasvir_init failed\n");
         return NULL;
     }
@@ -331,9 +331,9 @@ static void *thread_code(void *init_struct) {
     // Naming based on ID, not sure if this is reasonable.
     snprintf(area_name, 32, "kvs%d", args->id);
     strcpy(param.name, area_name);
-    d[args->id] = tasvir_new(param, 0); // Created a region.
-    assert(d[args->id] != MAP_FAILED);
-    data = d[args->id]->h->data;
+    d[args->id] = tasvir_new(param); // Created a region.
+    assert(d[args->id]);
+    data = tasvir_data(d[args->id]);
     dict = data;
     entry = (void *)(data + REGION_SIZE);
     key = (void *)(data +  2ull * REGION_SIZE);
@@ -348,9 +348,9 @@ static void *thread_code(void *init_struct) {
     param_lock.owner = NULL;
     param_lock.type = TASVIR_AREA_TYPE_APP;
     param_lock.len = 4 * sizeof(uint64_t);
-    l[args->id] = tasvir_new(param_lock, 0);
+    l[args->id] = tasvir_new(param_lock);
 
-    assert(l[args->id] != MAP_FAILED);
+    assert(l[args->id]);
     locks[args->id] = (uint64_t *)l[args->id];
     printf("Created created lock\n");
 
@@ -365,7 +365,7 @@ static void *thread_code(void *init_struct) {
         snprintf(area_name, 32, "kvs%d", i);
         d[i] = subscribe_region(area_name, root_desc);
         tasvir_service();
-        w[i] = subscribeDict(d[i]->h->data); // Data is on top.
+        w[i] = subscribeDict(tasvir_data(d[i])); // Data is on top.
         printf("Successfully subscribed to dictionary region for %d\n", i);
         tasvir_service();
 

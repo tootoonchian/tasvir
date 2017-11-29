@@ -1,11 +1,12 @@
 #!/bin/bash
 TASVIR_SRCDIR=/opt/tasvir
 TASVIR_BINDIR=$TASVIR_SRCDIR/build/bin
-THIS=$TASVIR_SRCDIR/scripts/run.sh
-PID_DAEMON=/var/run/tasvir-daemon.pid
-PID_BENCH=/var/run/tasvir-bench.pid
+RUNSCRIPT=$(realpath $0)
+PIDFILE_PREFIX=/var/run/tasvir-
 
 prepare() {
+    sysctl vm.nr_hugepages=1050
+
     max_freq=$(cat /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq)
     for i in /sys/devices/system/cpu/*/cpufreq; do
         echo performance > $i/scaling_governor
@@ -23,9 +24,83 @@ prepare() {
 }
 
 cleanup() {
-    start-stop-daemon -q --stop --remove-pidfile --pidfile $PID_BENCH &>/dev/null
-    start-stop-daemon -q --stop --remove-pidfile --pidfile $PID_DAEMON &>/dev/null
-    rm -f /dev/shm/tasvir /dev/hugepages/tasvir* &>/dev/null
+    for pidfile in ${PIDFILE_PREFIX}*; do
+        start-stop-daemon --stop --retry 3 --remove-pidfile --pidfile $pidfile &>/dev/null
+    done
+    rm -f /dev/shm/tasvir /dev/hugepages/tasvir* /var/run/.tasvir_config &>/dev/null
+}
+
+
+generate_cmd() {
+    generate_cmd_thread() {
+        local bgflag
+        local pmucmd
+        local gdbcmd
+        local pmucmd="/opt/tools/pmu-tools/toplev.py -l4 -S"
+        local stdbufcmd="stdbuf -o 0 -e 0"
+        local redirect
+        if [ $tid != d -a $tid != 0 ]; then
+            bgflag="--background"
+            redirect=">$logfile 2>&1"
+        else
+            #gdbcmd="gdb -ex run --args"
+            redirect="2>&1 | tee $logfile"
+        fi
+        #bgflag=""
+        #gdbcmd="gdb -ex run --args"
+        #redirect="2>&1 | tee $logfile"
+
+        cmd_thread="start-stop-daemon $bgflag --start --make-pidfile --pidfile ${PIDFILE_PREFIX}%TID%.pid --startas /bin/bash -- -c
+                    \"exec /usr/bin/numactl -C %CORE% $gdbcmd $stdbufcmd $* $redirect\""
+        cmd_thread=$(echo $cmd_thread | sed -e s/%CORE%/$core/g -e s/%TID%/$tid/g -e s/%NTHREADS%/$nthreads/g)
+        ((core++))
+    }
+
+    local core=${core:-0}
+    local pciaddr=${pciaddr:-85:00.0}
+    local nthreads=${nthreads:-1}
+    local delay=${delay:-2}
+
+    local cmd
+    local cmd_app="$*"
+    local cmd_daemon="$TASVIR_BINDIR/tasvir_daemon --core %CORE% --pciaddr $pciaddr --root"
+    local cmd_thread
+    local session=tasvir_run
+    local tid=d
+    local w=0
+    local timestamp=`date +"%Y%m%d-%H%M%S"`
+    local window=n$nthreads-$timestamp
+    local logfile="$(dirname $RUNSCRIPT)/log/$timestamp.n$nthreads.t%TID%"
+
+    cmd="byobu "
+    cmd+="set-option -gq mouse-utf8 on\; "
+    cmd+="set-option -gq mouse-resize-pane on\; "
+    cmd+="set-option -gq mouse-select-pane on\; "
+    cmd+="set-option -gq mouse-select-window on\; "
+    cmd+="set-window-option -gq mode-mouse on\; "
+    cmd+="set-window-option -gq remain-on-exit off\; "
+    tmux has-session -t $session &>/dev/null || cmd+="new-session -Ads $session\; "
+    [ -z $TMUX ] && cmd+="attach-session -t $session\; " || cmd+="switch-client -t $session\; "
+
+    # run the daemon
+    generate_cmd_thread $cmd_daemon
+    cmd+="new-window -t $session -n $window-$w '. $RUNSCRIPT; $cmd_thread; cleanup;'\; "
+
+    for tid in `seq 0 $((nthreads - 1))`; do
+        [ $tid -ne 0 -a $((tid % 4)) -eq 0 ] && cmd+="new-window -t $session -n $window-$((++w)) " || cmd+="split-window -t $session:$window-$w "
+        generate_cmd_thread $cmd_app
+        # run the worker
+        local cmd_last
+        [ $tid -eq 0 ] && cmd_last='bash' || cmd_last=''
+        cmd+="'ulimit -c unlimited; sleep $delay; $cmd_thread; $cmd_last'\; "
+    done
+
+    cmd+="select-layout -t $session:$window-0 main-horizontal\; "
+    for wid in `seq 1 $w`; do
+        cmd+="select-layout -t $session:$window-$wid tiled \; "
+    done
+
+    echo "$cmd"
 }
 
 benchmark() {
@@ -33,42 +108,25 @@ benchmark() {
     writes_per_service=100
     area_len=$((100 * 1024 * 1024))
     stride=8
-    core_daemon=18
-    core_bench=19
-    pciaddr=81:00.0
-    pciaddr_remote=8e:00.0
-    session=tasvir_benchmark
-    window_name=local-`date +"%Y%m%d-%H%M%S"`
-    window_name2=remote-`date +"%Y%m%d-%H%M%S"`
-    thread_delay=5
-    tmux has-session -t $session &>/dev/null
-    if [ $? -ne 0 ]; then
-        new_cmd="new-session -Ads $session ;"
-    fi
-    if [ -z $TMUX ]; then
-        new_cmd="$new_cmd attach-session -t $session"
-    else
-        new_cmd="$new_cmd switch-client -t $session"
-    fi
-    #wrapper="/opt/tools/pmu-tools/toplev.py -l4 -S"
-    #wrapper="gdb -ex run --args"
 
-    #cleanup
-    prepare
-
-    byobu $new_cmd \; \
-        new-window -t $session -n $window_name "$THIS cleanup; start-stop-daemon --start --make-pidfile --pidfile $PID_DAEMON --exec /usr/bin/numactl -- -C $core_daemon $wrapper $TASVIR_BINDIR/tasvir_daemon --core $core_daemon --pciaddr $pciaddr --root; $THIS cleanup; bash; byobu kill-window" \; \
-        new-window -t $session -n $window_name2 ssh -t c12 "$THIS cleanup; sleep 1; start-stop-daemon --start --make-pidfile --pidfile $PID_DAEMON --exec /usr/bin/numactl -- -C $core_daemon $wrapper $TASVIR_BINDIR/tasvir_daemon --core $core_daemon --pciaddr $pciaddr_remote; $THIS cleanup; bash; byobu kill-window" \; \
-        split-window -t $session:$window_name -h "sleep $thread_delay; start-stop-daemon --start --make-pidfile --pidfile $PID_BENCH --exec /usr/bin/numactl -- -C $core_bench $wrapper $TASVIR_BINDIR/tasvir_benchmark $core_bench $nr_writes $writes_per_service $area_len $stride; $THIS cleanup; bash; byobu kill-window" \; \
-        split-window -t $session:$window_name2 -h ssh -t c12 "sleep $thread_delay; start-stop-daemon --start --make-pidfile --pidfile $PID_BENCH --exec /usr/bin/numactl -- -C $core_bench $wrapper $TASVIR_BINDIR/tasvir_benchmark $core_bench $nr_writes $writes_per_service $area_len $stride; $THIS cleanup; bash; byobu kill-window"
+    cleanup
+    eval $(generate_cmd $TASVIR_BINDIR/tasvir_benchmark %CORE% $nr_writes $writes_per_service $area_len $stride)
 }
 
-dev() {
-    session=tasvir_dev
-    attach_cmd=$(if [ -z $TMUX ]; then echo "attach-session"; else echo "switch-client"; fi)
-    byobu new-session -AdPs $session &>/dev/null
-    byobu $attach_cmd -t $session \; \
-        new-window -t $session -n dev "vim -O $TASVIR_SRCDIR/{include/tasvir.h,src/tasvir.c}"
+ycsb() {
+    ycsb_dir=/opt/tasvir/misc/YCSB-C
+
+    cleanup
+    eval $(generate_cmd $TASVIR_BINDIR/kvstore -s %TID% -n 2 -c %CORE% -a $ycsb_dir/wtest-2.access -l $ycsb_dir/wtest-2.load)
+}
+
+cyclades() {
+    updater=${updater:-sparse_sgd}
+    nepochs=${nepoch:-11}
+    batch=${batch:-2000}
+
+    cleanup
+    eval $(generate_cmd $TASVIR_BINDIR/tasvir_cyclades -wid %TID% -core %CORE% --print_loss_per_epoch --print_partition_time --n_threads=%NTHREADS% --learning_rate=2e-2 -matrix_completion -cyclades_trainer -cyclades_batch_size=$batch -n_epochs=$nepochs -$updater --data_file=/opt/tasvir/apps/cyclades/data/movielens/ml-1m/movielens_1m.data)
 }
 
 setup_env() {

@@ -73,7 +73,7 @@ uint64_t experiment(tasvir_area_desc *d, size_t len, int count, int iter, int st
         count -= iter;
         i = iter;
         while (i--)
-            random_write(d->h->data, len - stride, stride);
+            random_write((uint8_t *)tasvir_data(d), len - stride, stride);
         if (do_service)
             tasvir_service();
     }
@@ -94,7 +94,7 @@ int main(int argc, char **argv) {
     init();
 
     tasvir_area_desc *root_desc = tasvir_init(TASVIR_THREAD_TYPE_APP, core, NULL);
-    if (root_desc == MAP_FAILED) {
+    if (!root_desc) {
         fprintf(stderr, "%s: tasvir_init failed\n", argv[0]);
         return -1;
     }
@@ -106,8 +106,8 @@ int main(int argc, char **argv) {
     param.len = area_len;
     param.stale_us = 50000;
     snprintf(param.name, sizeof(param.name), "benchmark-%04x", static_cast<uint16_t>(xorshift128plus()));
-    tasvir_area_desc *d = tasvir_new(param, 0);
-    if (d == MAP_FAILED) {
+    tasvir_area_desc *d = tasvir_new(param);
+    if (!d) {
         fprintf(stderr, "%s: tasvir_new failed\n", argv[0]);
         return -1;
     }

@@ -83,15 +83,15 @@ int main(int argc, char **argv) {
     }
 
     tasvir_area_desc *root_desc = tasvir_init(daemon_type, core, pciaddr);
-    if (root_desc == MAP_FAILED) {
+    if (!root_desc) {
         fprintf(stderr, "tasvir_daemon: tasvir_init_daemon failed\n");
         return -1;
     }
 
     while (true) {
-        tasvir_service();
-        rte_delay_us_block(10);
-    };
+        tasvir_service_block();
+        rte_delay_us_block(5);
+    }
 
     return 0;
 }
