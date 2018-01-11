@@ -35,49 +35,41 @@ public:
         model->SetUpWithPartitions(partitions);
         updater->SetUpWithPartitions(partitions);
 
-        // Default datapoint processing ordering.
-        // [thread][batch][index].
-        std::vector<std::vector<std::vector<int>>> per_batch_datapoint_order(FLAGS_n_threads);
-        for (int thread = 0; thread < FLAGS_n_threads; thread++) {
-            per_batch_datapoint_order[thread].resize(partitions.NumBatches());
-            for (int batch = 0; batch < partitions.NumBatches(); batch++) {
-                per_batch_datapoint_order[thread][batch].resize(partitions.NumDatapointsInBatch(thread, batch));
-                for (int index = 0; index < partitions.NumDatapointsInBatch(thread, batch); index++) {
-                    per_batch_datapoint_order[thread][batch][index] = index;
-                }
-            }
-        }
-
         // Keep track of statistics of training.
         TrainStatistics stats;
 
         // Train.
         Timer gradient_timer;
         for (int epoch = 0; epoch < FLAGS_n_epochs; epoch++) {
-            this->EpochBegin(epoch, gradient_timer, model, datapoints, &stats);
+            int batch = 0;
+            int num_datapoints = partitions.NumDatapointsInBatch(FLAGS_wid, batch);
 
-            // Random per batch datapoint processing.
-            if (FLAGS_random_per_batch_datapoint_processing) {
-                for (int thread = 0; thread < FLAGS_n_threads; thread++) {
-                    int batch = 0;
-                    for (int index = 0; index < partitions.NumDatapointsInBatch(thread, batch); index++) {
-                        per_batch_datapoint_order[thread][batch][index] =
-                            rand() % partitions.NumDatapointsInBatch(thread, batch);
-                    }
-                }
-            }
-
+            auto t1 = std::chrono::high_resolution_clock::now();
+            EpochBegin(epoch, gradient_timer, model, datapoints, &stats);
             updater->EpochBegin();
-
-#pragma omp parallel for schedule(static, 1)
-            for (int thread = 0; thread < FLAGS_n_threads; thread++) {
-                int batch = 0;  // Hogwild only has 1 batch.
-                for (int index_count = 0; index_count < partitions.NumDatapointsInBatch(thread, batch); index_count++) {
-                    int index = per_batch_datapoint_order[thread][batch][index_count];
-                    updater->Update(partitions.GetDatapoint(thread, batch, index));
-                }
+            model->EpochBegin();
+            auto t2 = std::chrono::high_resolution_clock::now();
+            model->BatchBegin(batch);
+            auto t3 = std::chrono::high_resolution_clock::now();
+            for (int dp_index = 0; dp_index < num_datapoints; dp_index++) {
+                int datapoint = FLAGS_random_per_batch_datapoint_processing ? rand() % num_datapoints : dp_index;
+                updater->Update(partitions.GetDatapoint(FLAGS_wid, batch, datapoint));
             }
+            auto t4 = std::chrono::high_resolution_clock::now();
+            model->BatchFinish(batch);
+            auto t5 = std::chrono::high_resolution_clock::now();
             updater->EpochFinish();
+            model->EpochFinish();
+            auto t6 = std::chrono::high_resolution_clock::now();
+
+            auto etb = std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count();
+            auto et1 = std::chrono::duration_cast<std::chrono::milliseconds>(t3 - t2).count();
+            auto et2 = std::chrono::duration_cast<std::chrono::milliseconds>(t4 - t3).count();
+            auto et3 = std::chrono::duration_cast<std::chrono::milliseconds>(t5 - t4).count();
+            auto ete = std::chrono::duration_cast<std::chrono::milliseconds>(t6 - t5).count();
+            auto tot = etb + ete + et1 + et2 + et3;
+            printf("tot=%9.3f -- eb=%9.3fms bb=%9.3fms cp=%9.3fms be=%9.3fms ee=%9.3fms\n", tot, etb, et1, et2, et3,
+                   ete);
         }
         return stats;
     }

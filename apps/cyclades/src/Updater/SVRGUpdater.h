@@ -58,7 +58,7 @@ protected:
     double Nu(int coordinate, int index_into_coordinate_vector) override {
         return FLAGS_learning_rate *
                (g[coordinate * model->NumCoordinates() + index_into_coordinate_vector] -
-                lambda[coordinate] * model->Data2D(coordinate, index_into_coordinate_vector, false));
+                lambda[coordinate] * model->Data(coordinate, index_into_coordinate_vector, false));
     }
 
     double Mu(int coordinate) override { return lambda[coordinate] * FLAGS_learning_rate; }
@@ -108,7 +108,7 @@ public:
             model->Lambda(coordinate, g_lambda[coordinate], *model);
             for (int j = 0; j < n_coords; j++) {
                 g[coordinate * n_coords + j] =
-                    (g_lambda[coordinate] * model->Data2D(coordinate, j, false) - g_kappa[coordinate][j]) *
+                    (g_lambda[coordinate] * model->Data(coordinate, j, false) - g_kappa[coordinate][j]) *
                     n_zeroes[coordinate];
             }
         }
@@ -129,7 +129,7 @@ public:
                     }
                     for (const auto &coord : datapoint.GetCoordinates()) {
                         for (int j = 0; j < n_coords; j++) {
-                            g[coord * n_coords + j] += g_lambda[coord] * model->Data2D(coord, j, false) -
+                            g[coord * n_coords + j] += g_lambda[coord] * model->Data(coord, j, false) -
                                                        g_kappa[coord][j] + g_h_bar[coord][j];
                         }
                     }

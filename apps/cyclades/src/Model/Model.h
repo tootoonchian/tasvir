@@ -18,24 +18,24 @@
 
 #include <sys/mman.h>
 #include <set>
+#include <sstream>
 #include <vector>
 
 #include "DatapointPartitions/DatapointPartitions.h"
 #include "Gradient/Gradient.h"
-#include "TasvirArray.h"
 #include "defines.h"
+#include "tasvir_array.hpp"
 
 class Model {
 protected:
-    tasvir::TasvirArray<double> *_loss;
-    tasvir::TasvirArray<double> *_data[8];
+    tasvir::Array<double> *_loss;
+    tasvir::Array<double> *_data;
     std::vector<std::vector<std::vector<std::vector<int>>>> _cmap;  // [batch][worker]
-    int _n_data;
     int _n_params;
     int _n_coords;
 
 public:
-    Model() : _n_data(0), _n_params(0), _n_coords(0) {}
+    Model() : _n_params(0), _n_coords(0) {}
 
     Model(const std::string &input_line) : Model() {}
     virtual ~Model() {}
@@ -68,8 +68,6 @@ public:
         }
     }
 
-    inline int NumData() { return _n_data; }
-
     // Return the number of parameters of the model.
     inline int NumParameters() { return _n_params; }
 
@@ -84,25 +82,23 @@ public:
     virtual void Kappa(int coordinate, std::vector<double> &out, Model &local_model) {}
     virtual void H_bar(int coordinate, std::vector<double> &out, Gradient &g, Model &local_model) {}
 
-    virtual void BatchBegin(int batch) {
-        for (int i = 0; i < NumData(); i++) {
-            _data[i]->Barrier();
-            _data[i]->CopySelect(_cmap[batch][FLAGS_wid]);
-        }
+    virtual void EpochBegin() {}
+
+    virtual void EpochFinish() {}
+
+    void BatchBegin(int batch) {
+        _data->Barrier();
+        _data->CopySelect(_cmap[batch][FLAGS_wid]);
     }
 
-    virtual void BatchFinish(int batch) {
-        for (int i = 0; i < NumData(); i++) {
-            _data[i]->ReduceSelect(_cmap[batch][FLAGS_wid]);
-        }
+    void BatchFinish(int batch) { _data->ReduceSelect(_cmap[batch][FLAGS_wid]); }
+
+    inline double &Data(int offset, bool global) {
+        return global ? _data->DataMaster()[offset] : _data->DataWorker()[offset];
     }
 
-    inline double &Data1D(int offset, bool global = false, int id = 0) {
-        return global ? _data[id]->DataMaster()[offset] : _data[id]->DataWorker()[offset];
-    }
-
-    inline double &Data2D(int parameter, int coordinate, bool global = false, int id = 0) {
-        return Data1D(parameter * NumCoordinates() + coordinate, global, id);
+    inline double &Data(int parameter, int coordinate, bool global) {
+        return Data(parameter * NumCoordinates() + coordinate, global);
     }
 };
 

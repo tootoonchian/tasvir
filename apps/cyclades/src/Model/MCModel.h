@@ -29,10 +29,10 @@ private:
     int rlength;
 
     void InitializePrivateModel() {
-        tasvir_log_write(&Data1D(0, true), sizeof(double) * NumParameters() * NumCoordinates());
+        tasvir_log_write(&Data(0, true), sizeof(double) * NumParameters() * NumCoordinates());
         for (int i = 0; i < NumParameters(); i++) {
             for (int j = 0; j < NumCoordinates(); j++) {
-                Data2D(i, j, true) = (double)rand() / (double)RAND_MAX;
+                Data(i, j, true) = (double)rand() / (double)RAND_MAX;
             }
         }
     }
@@ -43,14 +43,13 @@ private:
         input >> n_users >> n_movies;
         rlength = FLAGS_rlength;
 
-        _n_data = 1;
         _n_coords = rlength;
         _n_params = n_users + n_movies;
 
         // Allocate memory.
-        _loss = tasvir::TasvirArray<double>::Allocate("loss", FLAGS_wid, FLAGS_n_threads, 1);
-        _data[0] = tasvir::TasvirArray<double>::Allocate("model0", FLAGS_wid, FLAGS_n_threads,
-                                                         NumParameters() * NumCoordinates());
+        _data =
+            tasvir::Array<double>::Allocate("model", FLAGS_wid, FLAGS_n_threads, NumParameters() * NumCoordinates());
+        _loss = tasvir::Array<double>::Allocate("loss", FLAGS_wid, FLAGS_n_threads, 1);
 
         // Initialize private model.
         if (FLAGS_wid == 0)
@@ -83,9 +82,8 @@ public:
         for (size_t i = index_lo; i < index_hi; i++) {
             const auto &c = datapoints[i]->GetCoordinates();
             double cross_product = -datapoints[i]->GetWeights()[0];
-            for (size_t j = 0; j < rlength; j++) {
-                cross_product += Data2D(c[0], j, true) * Data2D(c[1], j, true);
-            }
+            for (size_t j = 0; j < NumCoordinates(); j++)
+                cross_product += Data(c[0], j, true) * Data(c[1], j, true);
             _loss->DataWorker()[0] += cross_product * cross_product;
         }
 
@@ -101,15 +99,15 @@ public:
             g.coeffs.resize(1);
         const auto &c = datapoint.GetCoordinates();
         g.coeffs[0] = -datapoint.GetWeights()[0];
-        for (int i = 0; i < rlength; i++)
-            g.coeffs[0] += local_model.Data2D(c[0], i, false) * local_model.Data2D(c[1], i, false);
+        for (int i = 0; i < NumCoordinates(); i++)
+            g.coeffs[0] += local_model.Data(c[0], i, false) * local_model.Data(c[1], i, false);
     }
 
     void H_bar(int coordinate, std::vector<double> &out, Gradient &g, Model &local_model) override {
         const auto &c = g.datapoint->GetCoordinates();
         const auto &other_coordinate = c[0] == coordinate ? c[1] : c[0];
-        for (int i = 0; i < rlength; i++)
-            out[i] = g.coeffs[0] * local_model.Data2D(other_coordinate, i, false);
+        for (int i = 0; i < NumCoordinates(); i++)
+            out[i] = g.coeffs[0] * local_model.Data(other_coordinate, i, false);
     }
 };
 

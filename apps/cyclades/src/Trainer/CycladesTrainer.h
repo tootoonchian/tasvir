@@ -55,6 +55,7 @@ public:
         model->SetUpWithPartitions(partitions);
         updater->SetUpWithPartitions(partitions);
         printf("Model size: %d\n", model->NumParameters() * model->NumCoordinates());
+
         // Keep track of statistics of training.
         TrainStatistics stats;
 
@@ -66,6 +67,7 @@ public:
             auto t1 = std::chrono::high_resolution_clock::now();
             EpochBegin(epoch, gradient_timer, model, datapoints, &stats);
             updater->EpochBegin();
+            model->EpochBegin();
             auto t2 = std::chrono::high_resolution_clock::now();
             for (int batch_index = 0; batch_index < num_batches; batch_index++) {
                 int batch = FLAGS_random_batch_processing ? rand() % partitions.NumBatches() : batch_index;
@@ -86,13 +88,14 @@ public:
             }
             auto t3 = std::chrono::high_resolution_clock::now();
             updater->EpochFinish();
+            model->EpochFinish();
             auto t4 = std::chrono::high_resolution_clock::now();
+
             etb = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
             ete = std::chrono::duration_cast<std::chrono::microseconds>(t4 - t3).count();
             auto tot = etb + ete + et1 + et2 + et3;
             printf("tot=%9.3f -- eb=%9.3fms bb=%9.3fms cp=%9.3fms be=%9.3fms ee=%9.3fms\n", tot / 1000., etb / 1000.,
                    et1 / 1000., et2 / 1000., et3 / 1000., ete / 1000.);
-            // printf("per_b: %9.3fus %9.3fus %9.3fus\n", et1 / num_batches, et2 / num_batches, et3 / num_batches);
         }
         return stats;
     }

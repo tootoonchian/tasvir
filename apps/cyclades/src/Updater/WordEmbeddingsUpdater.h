@@ -17,13 +17,12 @@
 #ifndef _WORDEMBEDDINGSUPDATER_
 #define _WORDEMBEDDINGSUPDATER_
 
+#include "Model/WordEmbeddingsModel.h"
 #include "Updater/SparseSGDUpdater.h"
 
 // Fast matrix completion SGD updater.
 class WordEmbeddingsSGDUpdater : public SparseSGDUpdater {
 protected:
-    double c_sum_mult1, c_sum_mult2;
-
     void PrepareWordEmbeddingsGradient(const Datapoint &datapoint) {
         if (gradient.coeffs.size() != 1)
             gradient.coeffs.resize(1);
@@ -32,26 +31,25 @@ protected:
         double weight = labels[0];
         double norm = 0;
         for (int i = 0; i < model->NumCoordinates(); i++) {
-            norm += (model->Data2D(c[0], i, false) + model->Data2D(c[1], i, false)) *
-                    (model->Data2D(c[0], i, false) + model->Data2D(c[1], i, false));
+            norm += (model->Data(c[0], i, false) + model->Data(c[1], i, false)) *
+                    (model->Data(c[0], i, false) + model->Data(c[1], i, false));
         }
-        gradient.coeffs[0] = 2 * weight * (log(weight) - norm - model->Data1D(0, true, 1));
+        gradient.coeffs[0] = 2 * weight * (log(weight) - norm - static_cast<WordEmbeddingsModel *>(model)->C());
 
         // Do some extra computation for optimization of C.
-        c_sum_mult1 += weight * (log(weight) - norm);
-        c_sum_mult2 += weight;
+        static_cast<WordEmbeddingsModel *>(model)->CSumMulti(0, false) += weight * (log(weight) - norm);
+        static_cast<WordEmbeddingsModel *>(model)->CSumMulti(1, false) += weight;
     }
 
     void ApplyWordEmbeddingsGradient(const Datapoint &datapoint) {
         const auto &c = datapoint.GetCoordinates();
         const auto &n_coords = model->NumCoordinates();
-        tasvir_log_write(&model->Data2D(c[0], 0, false), sizeof(double) * n_coords);
-        tasvir_log_write(&model->Data2D(c[1], 0, false), sizeof(double) * n_coords);
+        tasvir_log_write(&model->Data(c[0], 0, false), sizeof(double) * n_coords);
+        tasvir_log_write(&model->Data(c[1], 0, false), sizeof(double) * n_coords);
         for (int i = 0; i < model->NumCoordinates(); i++) {
-            double final_grad =
-                -(2 * gradient.coeffs[0] * (model->Data2D(c[0], i, false) + model->Data2D(c[1], i, false)));
-            model->Data2D(c[0], i, false) -= FLAGS_learning_rate * final_grad;
-            model->Data2D(c[1], i, false) -= FLAGS_learning_rate * final_grad;
+            double final_grad = -(2 * gradient.coeffs[0] * (model->Data(c[0], i, false) + model->Data(c[1], i, false)));
+            model->Data(c[0], i, false) -= FLAGS_learning_rate * final_grad;
+            model->Data(c[1], i, false) -= FLAGS_learning_rate * final_grad;
         }
     }
 
@@ -72,28 +70,10 @@ protected:
     }
 
 public:
-    WordEmbeddingsSGDUpdater(Model *model, std::vector<Datapoint *> &datapoints) : SparseSGDUpdater(model, datapoints) {
-        c_sum_mult1 = c_sum_mult2 = 0;
-    }
+    WordEmbeddingsSGDUpdater(Model *model, std::vector<Datapoint *> &datapoints)
+        : SparseSGDUpdater(model, datapoints) {}
 
     ~WordEmbeddingsSGDUpdater() {}
-
-    // Called when the epoch ends.
-    virtual void EpochFinish() override {
-        SparseSGDUpdater::EpochFinish();
-
-        // Update C based on closed form solution.
-        double C_A = 0, C_B = 0;
-        /*
-        for (int thread = 0; thread < FLAGS_n_threads; thread++) {
-            C_A += c_sum_mult1;
-            C_B += c_sum_mult2[thread];
-            c_sum_mult1[thread] = 0;
-            c_sum_mult2[thread] = 0;
-        }
-        model->ExtraData()[0] = C_A / C_B;
-        */
-    }
 };
 
 #endif

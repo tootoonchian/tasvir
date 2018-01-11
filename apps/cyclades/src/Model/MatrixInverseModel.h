@@ -2,7 +2,7 @@
 * Copyright 2016 [See AUTHORS file for list of authors]
 *
 *    Licensed under the Apache License, Version 2.0 (the "License");
-*    you may not use Data1D file except in compliance with the License.
+*    you may not use Data file except in compliance with the License.
 *    You may obtain a copy of the License at
 *
 *        http://www.apache.org/licenses/LICENSE-2.0
@@ -37,14 +37,16 @@ private:
         _n_params = n_coords;
         _n_coords = 1;
 
-        _data[0] = tasvir::TasvirArray<double>::Allocate("model0", FLAGS_wid, FLAGS_n_threads,
-                                                         NumParameters() * NumCoordinates());
+        // Allocate memory.
+        _loss = tasvir::Array<double>::Allocate("loss", FLAGS_wid, FLAGS_n_threads, 1);
+        _data =
+            tasvir::Array<double>::Allocate("model", FLAGS_wid, FLAGS_n_threads, NumParameters() * NumCoordinates());
 
         // Set elements in model to be a random number in range.
         if (FLAGS_wid == 0) {
-            tasvir_log_write(&Data1D(0, true), sizeof(double) * NumParameters() * NumCoordinates());
+            tasvir_log_write(&Data(0, true), sizeof(double) * NumParameters() * NumCoordinates());
             for (int i = 0; i < NumParameters(); i++) {
-                Data1D(i, true) = rand() % FLAGS_random_range;
+                Data(i, true) = rand() % FLAGS_random_range;
             }
         }
     }
@@ -162,10 +164,36 @@ public:
     }
 
     double ComputeLoss(const std::vector<Datapoint *> &datapoints) override {
+        /* sample
+        _loss->Barrier();
+        size_t nr_datapoints = datapoints.size();
+        size_t batch_size = nr_datapoints / FLAGS_n_threads + (nr_datapoints % FLAGS_n_threads > 0);
+        size_t index_lo = FLAGS_wid * batch_size;
+        size_t index_hi = std::min(nr_datapoints, index_lo + batch_size);
+
+        tasvir_log_write(&_loss->DataWorker()[0], sizeof(double));
+        _loss->DataWorker()[0] = 0;
+        for (size_t i = index_lo; i < index_hi; i++) {
+            const auto &labels = datapoints[i]->GetWeights();
+            const auto &c = datapoints[i]->GetCoordinates();
+            const auto &weight = labels[0];
+            double cross_product = 0;
+            for (size_t j = 0; j < NumCoordinates(); j++)
+                cross_product += (Data(c[0], j, true) + Data(c[1], j, true)) * (2 * Data(c[1], j, true));
+            _loss->DataWorker()[0] += weight * (log(weight) - cross_product - C) * (log(weight) - cross_product - C);
+        }
+
+        _loss->Barrier();
+        _loss->ReduceAdd();
+        _loss->Barrier();
+
+        return _loss->DataMaster()[0] / nr_datapoints;
+        */
+
         double loss = 0, sum_sqr = 0, second = 0;
         for (int i = 0; i < n_coords; i++) {
-            second += Data1D(i, true) * B[i];
-            sum_sqr += Data1D(i, true) * Data1D(i, true);
+            second += Data(i, true) * B[i];
+            sum_sqr += Data(i, true) * Data(i, true);
         }
 
         //#pragma omp parallel for num_threads(FLAGS_n_threads) reduction(+ : loss)
@@ -175,7 +203,7 @@ public:
             for (int j = 0; j < datapoint->GetWeights().size(); j++) {
                 int index = datapoint->GetCoordinates()[j];
                 double weight = datapoint->GetWeights()[j];
-                ai_t_x += Data1D(index, true) * weight;
+                ai_t_x += Data(index, true) * weight;
             }
             first -= ai_t_x * ai_t_x;
             loss += first / 2 - second / (double)n_coords;
@@ -191,7 +219,7 @@ public:
         const auto &coordinates = datapoint.GetCoordinates();
         double product = 0;
         for (int i = 0; i < coordinates.size(); i++) {
-            product += local_model.Data1D(coordinates[i], false) * weights[i];
+            product += local_model.Data(coordinates[i], false) * weights[i];
         }
         for (int i = 0; i < coordinates.size(); i++) {
             g.coeffs[coordinates[i]] = product * weights[i];

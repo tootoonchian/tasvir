@@ -24,19 +24,37 @@
 
 typedef void (*tasvir_area_desc_cb_fnptr)(tasvir_area_desc *);
 
-typedef struct tasvir_local_tstate tasvir_local_tstate;
-typedef struct tasvir_local_nstate tasvir_local_nstate;
-typedef struct tasvir_tls_state tasvir_tls_state;
+typedef struct tasvir_local_tdata tasvir_local_tdata;
+typedef struct tasvir_local_ndata tasvir_local_ndata;
+typedef struct tasvir_sync_job tasvir_sync_job;
+typedef struct tasvir_tls_data tasvir_tls_data;
+typedef enum {
+    TASVIR_THREAD_STATE_INVALID = 0,
+    TASVIR_THREAD_STATE_DEAD,
+    TASVIR_THREAD_STATE_BOOTING,
+    TASVIR_THREAD_STATE_RUNNING
+} tasvir_thread_state;
 
-struct tasvir_local_tstate { /* thread state */
+// static const char *tasvir_thread_state_str[] = {"invalid", "dead", "booting", "running"};
+
+struct tasvir_local_tdata { /* thread data */
     uint64_t update_us;
-    uint64_t timer_us;
     struct rte_ring *ring_tx;
     struct rte_ring *ring_rx;
-    bool sync;
+    tasvir_thread_state state;
+    bool do_sync; /* only updated by daemon */
+    bool in_sync; /* only updated by thread */
 } __attribute__((aligned(8)));
 
-struct tasvir_local_nstate { /* node state */
+struct tasvir_sync_job {
+    tasvir_area_desc *d;
+    atomic_size_t offset;
+    atomic_size_t bytes_seen;
+    atomic_size_t bytes_updated;
+    bool done __attribute__((aligned(TASVIR_CACHELINE_BYTES)));
+} __attribute__((aligned(TASVIR_CACHELINE_BYTES)));
+
+struct tasvir_local_ndata { /* node data */
     uint64_t time_us;
     uint64_t tsc_hz;
     struct rte_mempool *mp;
@@ -45,7 +63,7 @@ struct tasvir_local_nstate { /* node state */
     pthread_mutex_t mutex_boot;
     struct rte_ring *ring_ext_tx;
 
-    /* daemon state */
+    /* daemon data */
     struct ether_addr mac_addr;
     uint8_t port_id;
 
@@ -62,21 +80,21 @@ struct tasvir_local_nstate { /* node state */
     tasvir_sync_stats sync_stats_cur;
     tasvir_sync_stats sync_stats;
 
-    atomic_size_t cur_job;
     size_t nr_jobs;
     tasvir_sync_job jobs[TASVIR_NR_SYNC_JOBS];
 
     bool sync_req;
 
-    /* thread state */
-    tasvir_local_tstate tstate[TASVIR_NR_THREADS_LOCAL];
+    /* thread data */
+    tasvir_local_tdata tdata[TASVIR_NR_THREADS_LOCAL];
 } __attribute__((aligned(8)));
 
-struct tasvir_tls_state { /* thread-internal state */
+struct tasvir_tls_data { /* thread-internal data */
     tasvir_area_desc *node_desc;
     tasvir_area_desc *root_desc;
 
-    tasvir_local_nstate *nstate;
+    tasvir_local_ndata *ndata;
+    tasvir_local_tdata *tdata; /* this thread's tdata */
     tasvir_node *node;
     tasvir_thread *thread;
 
@@ -84,7 +102,6 @@ struct tasvir_tls_state { /* thread-internal state */
     bool is_daemon;
     uint16_t nr_msgs;
     int fd;
-    int fd_huge;
     int nr_fns;
     tasvir_fn_info fn_infos[TASVIR_NR_FN];
     tasvir_fn_info *ht_fid;
@@ -92,26 +109,42 @@ struct tasvir_tls_state { /* thread-internal state */
     tasvir_rpc_status status_l[TASVIR_NR_RPC_MSG];
 };
 
-static tasvir_tls_state ttls;
+/* tasvir thread-local data */
+static tasvir_tls_data ttld;
 
-_Static_assert(sizeof(tasvir_local_nstate) <= TASVIR_SIZE_LOCAL,
-               "TASVIR_SIZE_LOCAL smaller than sizeof(tasvir_local_nstate)");
+_Static_assert(sizeof(tasvir_local_ndata) <= TASVIR_SIZE_LOCAL,
+               "TASVIR_SIZE_LOCAL smaller than sizeof(tasvir_local_ndata)");
 
-#define TASVIR_LOG(...)                                                                       \
-    {                                                                                         \
-        fprintf(stderr, "%14lu %-22.22s ", ttls.nstate ? ttls.nstate->time_us : 0, __func__); \
-        fprintf(stderr, __VA_ARGS__);                                                         \
+#define MS2US (1000)
+#define S2US (1000 * MS2US)
+
+#define RED "\x1B[31m"
+#define GRN "\x1B[32m"
+#define YEL "\x1B[33m"
+#define BLU "\x1B[34m"
+#define MAG "\x1B[35m"
+#define CYN "\x1B[36m"
+#define WHT "\x1B[37m"
+#define RESET "\x1B[0m"
+
+#define LOG_COLORS(MSG_CLR, FMT, ...)                                                   \
+    {                                                                                   \
+        fprintf(stderr, GRN "%14.3f " WHT "%-22.22s " MSG_CLR FMT "\n" RESET,           \
+                ttld.ndata ? ttld.ndata->time_us / 1000. : 0, __func__, ##__VA_ARGS__); \
     }
 
-#define TASVIR_MIN(x, y) (x < y ? x : y)
+#define LOG_DBG(FMT, ...) LOG_COLORS(WHT, FMT, ##__VA_ARGS__)
+#define LOG_ERR(FMT, ...) LOG_COLORS(RED, FMT, ##__VA_ARGS__)
+#define LOG_INF(FMT, ...) LOG_COLORS(YEL, FMT, ##__VA_ARGS__)
 
+#define MIN(x, y) (x < y ? x : y)
 #define TASVIR_ALIGN_ARG(x) (size_t) TASVIR_ALIGNX(x, sizeof(tasvir_arg_promo_t))
 
 /* function prototypes */
 
 static inline int tasvir_attach_helper(tasvir_area_desc *, tasvir_node *);
 static inline tasvir_thread *tasvir_init_thread(pid_t pid, uint16_t core, uint8_t type);
-static inline void tasvir_init_finish(tasvir_thread *);
+static inline bool tasvir_init_finish(tasvir_thread *);
 static inline size_t tasvir_sync_area_external_boot(tasvir_area_desc *d, bool boot);
 
 /* rpc helpers */
@@ -128,21 +161,21 @@ static void rpc_tasvir_init_thread(void *v, ptrdiff_t *o) {
     *(tasvir_thread **)R = tasvir_init_thread(*(pid_t *)X(0), *(uint16_t *)X(1), *(uint8_t *)X(2));
 }
 
-static void rpc_tasvir_init_finish(void *v, ptrdiff_t *o) { tasvir_init_finish(*(tasvir_thread **)X(0)); }
+static void rpc_tasvir_init_finish(void *v, ptrdiff_t *o) { *(bool *)R = tasvir_init_finish(*(tasvir_thread **)X(0)); }
 
 static void rpc_tasvir_new(void *v, ptrdiff_t *o) { *(tasvir_area_desc **)R = tasvir_new(*(tasvir_area_desc *)X(0)); }
 
-static void rpc_tasvir_set_owner(void *v, ptrdiff_t *o) {
-    tasvir_set_owner(*(tasvir_area_desc **)X(0), *(tasvir_thread **)X(1));
+static void rpc_tasvir_update_owner(void *v, ptrdiff_t *o) {
+    *(bool *)R = tasvir_update_owner(*(tasvir_area_desc **)X(0), *(tasvir_thread **)X(1));
 }
 #undef R
 #undef X
 
 /* utils */
 
-static inline uint64_t tasvir_gettime_us() { return 1E6 * rte_rdtsc() / ttls.nstate->tsc_hz; }
+static inline uint64_t tasvir_gettime_us() { return 1E6 * rte_rdtsc() / ttld.ndata->tsc_hz; }
 
-static inline void tasvir_hexdump(void *addr, size_t len) {
+__attribute__((unused)) static inline void tasvir_hexdump(void *addr, size_t len) {
     uint8_t *b = (uint8_t *)addr;
     size_t i;
     for (i = 0; i < len; i += 4) {
@@ -153,26 +186,22 @@ static inline void tasvir_hexdump(void *addr, size_t len) {
     fprintf(stderr, "\n");
 }
 
-static void tasvir_timer_init() { ttls.nstate->tstate[ttls.thread->tid.idx].timer_us = tasvir_gettime_us(); }
-
-static bool tasvir_timer_expired(uint64_t timeout_us) {
-    return tasvir_gettime_us() - ttls.nstate->tstate[ttls.thread->tid.idx].timer_us > timeout_us;
-}
-
-static inline int tasvir_barrier_wait(atomic_int *count, int64_t timeout_us) {
+static inline bool tasvir_barrier_wait(atomic_int *count, int64_t timeout_us) {
     uint64_t end_time_us = tasvir_gettime_us() + timeout_us;
     int val = atomic_fetch_sub(count, 1) - 1;
-    while (val > 0) {
-        if (tasvir_gettime_us() > end_time_us && atomic_compare_exchange_weak(count, &val, -1))
-            break;
+    while (tasvir_gettime_us() < end_time_us && val > 0) {
         rte_delay_us_block(1);
         val = atomic_load(count);
     }
-    // invariant: *count is non-positive at the end
-    return val != 0;
+
+    /* ensure output is either 0 or -1 */
+    while (val > 0 && !atomic_compare_exchange_weak(count, &val, -1))
+        val = atomic_load(count);
+
+    return val == 0;
 }
 
-static inline bool tasvir_is_attached(tasvir_area_desc *d, tasvir_node *node) {
+static inline bool tasvir_is_attached(const tasvir_area_desc *d, const tasvir_node *node) {
     if (d->h && d->h->active)
         for (size_t i = 0; i < d->h->nr_users; i++)
             if (d->h->users[i].node == node)
@@ -181,34 +210,30 @@ static inline bool tasvir_is_attached(tasvir_area_desc *d, tasvir_node *node) {
 }
 
 static inline bool tasvir_is_owner(const tasvir_area_desc *d) {
-    if (!d) { /* assuming called on root's pd */
-        return ttls.is_root;
+    if (!d) { /* assume called on root's pd */
+        return ttld.is_root;
     } else if (!d->pd) { /* root area */
-        return ttls.is_root;
-    } else if (!ttls.thread) { /* preboot: node area, only daemon should ever reach here */
-        assert(ttls.is_daemon);
-        return ttls.is_daemon;
+        return ttld.is_root;
+    } else if (!ttld.thread) { /* preboot: node area, only daemon should ever reach here */
+        return ttld.is_daemon;
     } else if (!d->owner) { /* assume ownership if owner is NULL */
         return true;
     } else {
-        return d->owner == ttls.thread;
+        return d->owner == ttld.thread;
     }
 }
 
-static inline size_t tasvir_size_loggable(const tasvir_area_desc *d) {
-    return (size_t)TASVIR_ALIGN((d->type == TASVIR_AREA_TYPE_CONTAINER
-                                     ? (sizeof(tasvir_area_header) + d->nr_areas_max + sizeof(tasvir_area_desc))
-                                     : d->len));
-}
+/* assumption: d && d->h */
+static inline bool tasvir_is_mapped_rw(const tasvir_area_desc *d) { return d->h->private_tag.rw; }
 
-static inline bool tasvir_tid_match(const tasvir_tid *id, const tasvir_tid_type t) {
+static inline bool tasvir_tid_match(const tasvir_tid id, const tasvir_tid_type t) {
     switch (t) {
     case TASVIR_TID_BROADCAST:
-        return memcmp(id, &ttls.nstate->broadcast_tid, sizeof(tasvir_tid)) == 0;
+        return memcmp(&id, &ttld.ndata->broadcast_tid, sizeof(tasvir_tid)) == 0;
     case TASVIR_TID_UPDATE:
-        return memcmp(id, &ttls.nstate->update_tid, sizeof(tasvir_tid)) == 0;
+        return memcmp(&id, &ttld.ndata->update_tid, sizeof(tasvir_tid)) == 0;
     case TASVIR_TID_LOCAL:
-        return memcmp(&id->nid, ttls.node ? &ttls.node->nid : &ttls.nstate->nodecast_tid.nid, sizeof(tasvir_nid)) == 0;
+        return memcmp(&id.nid, ttld.node ? &ttld.node->nid : &ttld.ndata->nodecast_tid.nid, sizeof(tasvir_nid)) == 0;
     case TASVIR_TID_DEFAULT:
         return true;
     default:
@@ -216,36 +241,42 @@ static inline bool tasvir_tid_match(const tasvir_tid *id, const tasvir_tid_type 
     }
 }
 
-static inline bool tasvir_is_thread_local(tasvir_thread *t) { return tasvir_tid_match(&t->tid, TASVIR_TID_LOCAL); }
+static inline bool tasvir_is_thread_local(tasvir_thread *t) { return tasvir_tid_match(t->tid, TASVIR_TID_LOCAL); }
 
-static inline void tasvir_tid2str(tasvir_tid *tid, size_t buf_size, char *buf) {
-    ether_format_addr(buf, buf_size, &tid->nid.mac_addr);
-    snprintf(&buf[strlen(buf)], buf_size - strlen(buf), ":%d", tid->idx);
+static inline void tasvir_tid2str(tasvir_tid tid, size_t buf_size, char *buf) {
+    ether_format_addr(buf, buf_size, &tid.nid.mac_addr);
+    snprintf(&buf[strlen(buf)], buf_size - strlen(buf), ":%d", tid.idx);
 }
 
 static inline void tasvir_print_msg_rpc_info(tasvir_msg_rpc *msg, bool inbound) {
     tasvir_str src_str, dst_str;
-    tasvir_tid2str(&msg->h.src_tid, sizeof(src_str), src_str);
-    tasvir_tid2str(&msg->h.dst_tid, sizeof(dst_str), dst_str);
-    TASVIR_LOG("%s %s->%s id=%d type=%s desc=%s fid=%d\n", inbound ? "incoming" : "outgoing", src_str, dst_str,
-               msg->h.id, msg->h.type == TASVIR_MSG_TYPE_RPC_REQUEST ? "request" : "response",
-               msg->d ? msg->d->name : "ROOT", msg->fid);
+    tasvir_tid2str(msg->h.src_tid, sizeof(src_str), src_str);
+    tasvir_tid2str(msg->h.dst_tid, sizeof(dst_str), dst_str);
+    tasvir_fn_info *fni;
+    HASH_FIND(h_fid, ttld.ht_fid, &msg->fid, sizeof(msg->fid), fni);
+
+    LOG_DBG("%s %s->%s id=%d type=%s desc=%s f=%s", inbound ? "incoming" : "outgoing", src_str, dst_str, msg->h.id,
+            msg->h.type == TASVIR_MSG_TYPE_RPC_REQUEST ? "request" : "response", msg->d ? msg->d->name : "ROOT",
+            fni->name);
     // tasvir_hexdump(&msg->h.eh, msg->h.mbuf.data_len);
 }
 
-static inline void tasvir_change_vaddr(void *base1, void *base2, size_t len, bool swap) {
+static inline void tasvir_update_va(const tasvir_area_desc *d, bool is_rw) {
     void *ret;
-    ptrdiff_t base1_rel = (uint8_t *)(swap ? base2 : base1) - (uint8_t *)TASVIR_ADDR_BASE;
-    ptrdiff_t base2_rel = (uint8_t *)(swap ? base1 : base2) - (uint8_t *)TASVIR_ADDR_BASE;
-    TASVIR_LOG("%s %p<->%p %lu\n", swap ? "swap" : "revert", base1, base2, len);
-    ret = mmap(base1, len, PROT_READ | PROT_WRITE, MAP_NORESERVE | MAP_SHARED | MAP_FIXED, ttls.fd, base1_rel);
-    if (ret != base1) {
-        TASVIR_LOG("mmap for working area failed (request=%p return=%p)\n", ret, base1);
+    void *data = (uint8_t *)d->h;
+    void *shadow = tasvir_data2shadow(d->h);
+    ptrdiff_t data_offset = (uint8_t *)data - (uint8_t *)TASVIR_ADDR_BASE;
+    ptrdiff_t shadow_offset = (uint8_t *)shadow - (uint8_t *)TASVIR_ADDR_BASE;
+    ret = mmap(data, d->offset_log_end, PROT_READ | PROT_WRITE, MAP_NORESERVE | MAP_SHARED | MAP_FIXED, ttld.fd,
+               is_rw ? shadow_offset : data_offset);
+    if (ret != data) {
+        LOG_DBG("mmap for working area failed (request=%p return=%p)", data, ret);
         abort();
     }
-    ret = mmap(base2, len, PROT_READ | PROT_WRITE, MAP_NORESERVE | MAP_SHARED | MAP_FIXED, ttls.fd, base2_rel);
-    if (ret != base2) {
-        TASVIR_LOG("mmap for scratch area failed (request=%p return=%p)\n", ret, base1);
+    ret = mmap(shadow, d->offset_log_end, PROT_READ | PROT_WRITE, MAP_NORESERVE | MAP_SHARED | MAP_FIXED, ttld.fd,
+               is_rw ? data_offset : shadow_offset);
+    if (ret != shadow) {
+        LOG_DBG("mmap for scratch area failed (request=%p return=%p)", shadow, ret);
         abort();
     }
 }
@@ -255,22 +286,12 @@ static inline void tasvir_mov32_stream(void *dst, const void *src) {
     _mm256_stream_si256((__m256i *)dst, m);
 }
 
-static inline void tasvir_mov64_stream(void *dst, const void *src) {
+__attribute__((unused)) static inline void tasvir_mov64_stream(void *dst, const void *src) {
     tasvir_mov32_stream(dst, src);
     tasvir_mov32_stream((uint8_t *)dst + 32, (uint8_t *)src + 32);
 }
 
 static inline void tasvir_mov32blocks_stream(void *dst, const void *src, size_t len) {
-    /*
-    bool test = false;
-    if (src == 0x100000001000 || dst == 0x100000001000) {
-        test = true;
-        tasvir_area_desc *d1 = 0x100000001010;
-        tasvir_area_desc *d2 = 0x140000001010;
-        printf("TEST BEFORE h=%p h=%p\n", d1->h, d2->h);
-    }
-    TASVIR_LOG("%p->%p %lu\n", src, dst, len);
-    */
     while (len > 0) {
         tasvir_mov32_stream(dst, src);
         /* rte_mov32(dst, src); */
@@ -278,16 +299,9 @@ static inline void tasvir_mov32blocks_stream(void *dst, const void *src, size_t 
         dst = (uint8_t *)dst + 32;
         src = (uint8_t *)src + 32;
     }
-    /*
-    if (test) {
-        tasvir_area_desc *d1 = 0x100000001010;
-        tasvir_area_desc *d2 = 0x140000001010;
-        printf("TEST AFTER h=%p h=%p\n", d1->h, d2->h);
-    }
-    */
 }
 
-static inline void tasvir_memset_stream(void *dst, char c, size_t len) {
+__attribute__((unused)) static inline void tasvir_memset_stream(void *dst, char c, size_t len) {
     uint8_t *ptr = dst;
     while ((uintptr_t)ptr & 31UL) {
         *ptr = c;
@@ -301,6 +315,11 @@ static inline void tasvir_memset_stream(void *dst, char c, size_t len) {
     }
     while (len-- > 0)
         *ptr++ = c;
+}
+
+__attribute__((unused)) static inline void tasvir_print_area(tasvir_area_desc *d) {
+    LOG_DBG("name=%s owner=%p version=%lu update_us=%lu", d->name, (void *)d->owner, d->h ? d->h->version : 0,
+            d->h ? d->h->update_us : 0);
 }
 
 /* initializtion */
@@ -333,15 +352,15 @@ static inline void tasvir_init_rpc() {
         .name = "tasvir_init_finish",
         .fid = 4,
         .argc = 1,
-        .ret_len = 0,
+        .ret_len = sizeof(bool),
         .arg_lens = {sizeof(tasvir_thread *)},
     });
     tasvir_rpc_register(&(tasvir_fn_info){
-        .fnptr = &rpc_tasvir_set_owner,
-        .name = "tasvir_set_owner",
+        .fnptr = &rpc_tasvir_update_owner,
+        .name = "tasvir_update_owner",
         .fid = 5,
         .argc = 2,
-        .ret_len = 0,
+        .ret_len = sizeof(bool),
         .arg_lens = {sizeof(tasvir_area_desc *), sizeof(tasvir_thread *)},
     });
     tasvir_rpc_register(&(tasvir_fn_info){
@@ -375,31 +394,31 @@ static inline int tasvir_init_dpdk(uint16_t core, char *pciaddr) {
     argv[argc++] = "--socket-mem";
     argv[argc++] = mem_str;
     argv[argc++] = "--proc-type";
-    argv[argc++] = ttls.is_daemon ? "primary" : "secondary";
+    argv[argc++] = ttld.is_daemon ? "primary" : "secondary";
     if (pciaddr) {
         argv[argc++] = "--pci-whitelist";
         argv[argc++] = pciaddr;
     }
     retval = rte_eal_init(argc, argv);
     if (retval < 0) {
-        TASVIR_LOG("rte_eal_init failed\n");
+        LOG_DBG("rte_eal_init failed");
         return -1;
     }
     return 0;
 }
 
 static int tasvir_init_port(char *pciaddr) {
-    if (!ttls.is_daemon || !pciaddr)
+    if (!ttld.is_daemon || !pciaddr)
         return 0;
 
     int nb_ports = rte_eth_dev_count();
     if (nb_ports != 1) {
-        TASVIR_LOG("rte_eth_dev_count() != 1\n");
+        LOG_DBG("rte_eth_dev_count() != 1");
         return -1;
     }
-    ttls.nstate->port_id = 0;
-    rte_eth_macaddr_get(ttls.nstate->port_id, &ttls.nstate->mac_addr);
-    ether_addr_copy(&ttls.nstate->mac_addr, &ttls.nstate->nodecast_tid.nid.mac_addr);
+    ttld.ndata->port_id = 0;
+    rte_eth_macaddr_get(ttld.ndata->port_id, &ttld.ndata->mac_addr);
+    ether_addr_copy(&ttld.ndata->mac_addr, &ttld.ndata->nodecast_tid.nid.mac_addr);
 
     struct rte_eth_dev_info dev_info;
     struct rte_eth_conf port_conf;
@@ -411,7 +430,7 @@ static int tasvir_init_port(char *pciaddr) {
 
     /* prepare configs */
     memset(&port_conf, 0, sizeof(port_conf));
-    rte_eth_dev_info_get(ttls.nstate->port_id, &dev_info);
+    rte_eth_dev_info_get(ttld.ndata->port_id, &dev_info);
     rx_conf = &dev_info.default_rxconf;
     tx_conf = &dev_info.default_txconf;
     port_conf.rxmode.mq_mode = ETH_MQ_RX_NONE;
@@ -427,123 +446,125 @@ static int tasvir_init_port(char *pciaddr) {
     port_conf.txmode.mq_mode = ETH_MQ_TX_NONE;
     port_conf.intr_conf.lsc = 0;
 
-    retval = rte_eth_dev_configure(ttls.nstate->port_id, 1, 1, &port_conf);
+    retval = rte_eth_dev_configure(ttld.ndata->port_id, 1, 1, &port_conf);
     if (retval < 0) {
-        TASVIR_LOG("Cannot configure device: err=%d, port=%d\n", retval, ttls.nstate->port_id);
+        LOG_DBG("Cannot configure device: err=%d, port=%d", retval, ttld.ndata->port_id);
         return -1;
     }
 
-    retval = rte_eth_rx_queue_setup(ttls.nstate->port_id, 0, 4096, rte_eth_dev_socket_id(ttls.nstate->port_id), rx_conf,
-                                    ttls.nstate->mp);
+    retval = rte_eth_rx_queue_setup(ttld.ndata->port_id, 0, 4096, rte_eth_dev_socket_id(ttld.ndata->port_id), rx_conf,
+                                    ttld.ndata->mp);
     if (retval < 0) {
-        TASVIR_LOG("rte_eth_rx_queue_setup:err=%d, port=%u\n", retval, (unsigned)ttls.nstate->port_id);
+        LOG_DBG("rte_eth_rx_queue_setup:err=%d, port=%u", retval, (unsigned)ttld.ndata->port_id);
         return -1;
     }
 
-    retval =
-        rte_eth_tx_queue_setup(ttls.nstate->port_id, 0, 4096, rte_eth_dev_socket_id(ttls.nstate->port_id), tx_conf);
+    retval = rte_eth_tx_queue_setup(ttld.ndata->port_id, 0, 4096, rte_eth_dev_socket_id(ttld.ndata->port_id), tx_conf);
     if (retval < 0) {
-        TASVIR_LOG("rte_eth_tx_queue_setup:err=%d, port=%u\n", retval, (unsigned)ttls.nstate->port_id);
+        LOG_DBG("rte_eth_tx_queue_setup:err=%d, port=%u", retval, (unsigned)ttld.ndata->port_id);
         return -1;
     }
 
-    retval = rte_eth_dev_start(ttls.nstate->port_id);
+    retval = rte_eth_dev_start(ttld.ndata->port_id);
     if (retval < 0) {
-        TASVIR_LOG("rte_eth_dev_start: err=%d, port=%u\n", retval, ttls.nstate->port_id);
+        LOG_DBG("rte_eth_dev_start: err=%d, port=%u", retval, ttld.ndata->port_id);
         return -1;
     }
 
-    retval = rte_eth_dev_set_link_up(ttls.nstate->port_id);
+    retval = rte_eth_dev_set_link_up(ttld.ndata->port_id);
     if (retval < 0) {
-        TASVIR_LOG("rte_eth_dev_set_link_up: err=%d, port=%u\n", retval, ttls.nstate->port_id);
+        LOG_DBG("rte_eth_dev_set_link_up: err=%d, port=%u", retval, ttld.ndata->port_id);
         return -1;
     }
 
-    end_time_us = tasvir_gettime_us() + 5 * 1000 * 1000;
+    end_time_us = tasvir_gettime_us() + 2 * S2US;
     do {
-        rte_eth_link_get(ttls.nstate->port_id, &link);
+        rte_eth_link_get(ttld.ndata->port_id, &link);
     } while (tasvir_gettime_us() < end_time_us && link.link_status != ETH_LINK_UP);
 
     if (link.link_status != ETH_LINK_UP) {
-        TASVIR_LOG("rte_eth_link_get_nowait: link is down port=%u\n", ttls.nstate->port_id);
+        LOG_DBG("rte_eth_link_get_nowait: link is down port=%u", ttld.ndata->port_id);
         return -1;
     }
 
-    rte_eth_promiscuous_enable(ttls.nstate->port_id);
-    rte_eth_stats_reset(ttls.nstate->port_id);
-    rte_eth_xstats_reset(ttls.nstate->port_id);
+    rte_eth_promiscuous_enable(ttld.ndata->port_id);
+    rte_eth_stats_reset(ttld.ndata->port_id);
+    rte_eth_xstats_reset(ttld.ndata->port_id);
 
     tasvir_str buf;
-    ether_format_addr(buf, sizeof(buf), &ttls.nstate->mac_addr);
-    TASVIR_LOG("port=%d mac=%s\n", ttls.nstate->port_id, buf);
+    ether_format_addr(buf, sizeof(buf), &ttld.ndata->mac_addr);
+    LOG_DBG("port=%d mac=%s", ttld.ndata->port_id, buf);
 
     return 0;
 }
 
 static int tasvir_init_local() {
     void *base;
-    int shm_oflag = ttls.is_daemon ? O_CREAT | O_EXCL | O_RDWR : O_RDWR;
-    mode_t shm_mode = ttls.is_daemon ? S_IRUSR | S_IWUSR : 0;
+    int shm_oflag = ttld.is_daemon ? O_CREAT | O_EXCL | O_RDWR : O_RDWR;
+    mode_t shm_mode = ttld.is_daemon ? S_IRUSR | S_IWUSR : 0;
     ptrdiff_t size_whole = TASVIR_ADDR_END - TASVIR_ADDR_BASE;
 
-    ttls.fd = shm_open("tasvir", shm_oflag, shm_mode);
-    if (ttls.fd == -1)
+    ttld.fd = shm_open("tasvir", shm_oflag, shm_mode);
+    if (ttld.fd == -1)
         return -1;
-    if (ftruncate(ttls.fd, size_whole)) {
-        TASVIR_LOG("ftruncate failed (%s)\n", strerror(errno));
+    if (ftruncate(ttld.fd, size_whole)) {
+        LOG_DBG("ftruncate failed (%s)", strerror(errno));
         return -1;
     }
-    base = mmap((void *)TASVIR_ADDR_BASE, size_whole, PROT_READ | PROT_WRITE, MAP_NORESERVE | MAP_SHARED, ttls.fd, 0);
+    base = mmap((void *)TASVIR_ADDR_BASE, size_whole, PROT_READ | PROT_WRITE, MAP_NORESERVE | MAP_SHARED, ttld.fd, 0);
     if (base != (void *)TASVIR_ADDR_BASE) {
-        TASVIR_LOG("mmap failed\n");
+        LOG_DBG("mmap failed");
         return -1;
     }
 
-    ttls.nstate = (void *)TASVIR_ADDR_LOCAL;
+    ttld.ndata = (void *)TASVIR_ADDR_LOCAL;
+    ttld.tdata = &ttld.ndata->tdata[TASVIR_THREAD_DAEMON_IDX];
 
-    if (ttls.is_daemon) {
-        memset(ttls.nstate, 0, sizeof(tasvir_local_nstate));
+    if (ttld.is_daemon) {
+        memset(ttld.ndata, 0, sizeof(tasvir_local_ndata));
         /* boot mutex */
         pthread_mutexattr_t mutex_attr;
         pthread_mutexattr_init(&mutex_attr);
         pthread_mutexattr_setpshared(&mutex_attr, PTHREAD_PROCESS_SHARED);
-        pthread_mutex_init(&ttls.nstate->mutex_boot, &mutex_attr);
+        pthread_mutex_init(&ttld.ndata->mutex_boot, &mutex_attr);
         pthread_mutexattr_destroy(&mutex_attr);
+        atomic_store(&ttld.ndata->barrier_entry, -1);
+        atomic_store(&ttld.ndata->barrier_exit, -1);
 
         /* mempool */
-        ttls.nstate->mp =
+        ttld.ndata->mp =
             rte_pktmbuf_pool_create("mempool", 200 * 1024, 256, 0, RTE_MBUF_DEFAULT_BUF_SIZE, rte_socket_id());
-        if (!ttls.nstate->mp) {
-            TASVIR_LOG("failed to create pkt mempool\n");
+        if (!ttld.ndata->mp) {
+            LOG_DBG("failed to create pkt mempool");
             return -1;
         }
 
         /* tx ring */
-        ttls.nstate->ring_ext_tx =
+        ttld.ndata->ring_ext_tx =
             rte_ring_create("tasvir_ext_tx", TASVIR_RING_SIZE, rte_socket_id(), RING_F_SP_ENQ | RING_F_SC_DEQ);
-        if (ttls.nstate->ring_ext_tx == NULL) {
-            TASVIR_LOG("failed to create external rings");
+        if (ttld.ndata->ring_ext_tx == NULL) {
+            LOG_DBG("failed to create external rings");
             return -1;
         }
 
         /* timing */
-        ttls.nstate->tsc_hz = rte_get_tsc_hz();
+        ttld.ndata->tsc_hz = rte_get_tsc_hz();
 
         /* ids */
-        ttls.nstate->update_tid.nid = (tasvir_nid){.mac_addr = {{0x01, 0x00, 0x5e, 0x00, 0x00, 0x00}}};
-        ttls.nstate->update_tid.idx = -1;
-        ttls.nstate->update_tid.pid = -1;
-        ttls.nstate->broadcast_tid.nid = (tasvir_nid){.mac_addr = {{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}}};
-        ttls.nstate->broadcast_tid.idx = -1;
-        ttls.nstate->broadcast_tid.pid = -1;
-        ttls.nstate->nodecast_tid = ttls.nstate->broadcast_tid;
+        ttld.ndata->update_tid.nid = (tasvir_nid){.mac_addr = {{0x01, 0x00, 0x5e, 0x00, 0x00, 0x00}}};
+        ttld.ndata->update_tid.idx = -1;
+        ttld.ndata->update_tid.pid = -1;
+        ttld.ndata->broadcast_tid.nid = (tasvir_nid){.mac_addr = {{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}}};
+        ttld.ndata->broadcast_tid.idx = -1;
+        ttld.ndata->broadcast_tid.pid = -1;
+        ttld.ndata->nodecast_tid = ttld.ndata->broadcast_tid;
     } else {
-        uint64_t end_time_us = tasvir_gettime_us() + 1 * 1000 * 1000;
-        while (tasvir_gettime_us() < end_time_us && !ttls.nstate->tstate[TASVIR_THREAD_DAEMON_IDX].ring_tx) {
+        uint64_t end_time_us = tasvir_gettime_us() + S2US;
+        while (tasvir_gettime_us() < end_time_us && ttld.tdata->state != TASVIR_THREAD_STATE_RUNNING) {
             rte_delay_ms(1);
         }
-        if (!ttls.nstate->tstate[TASVIR_THREAD_DAEMON_IDX].ring_tx) {
-            TASVIR_LOG("daemon has not yet initialized the bootstrap ring\n");
+        if (ttld.tdata->state != TASVIR_THREAD_STATE_RUNNING) {
+            LOG_DBG("daemon has not yet initialized");
             return -1;
         }
     }
@@ -552,10 +573,10 @@ static int tasvir_init_local() {
 }
 
 static int tasvir_init_root() {
-    ttls.root_desc = (tasvir_area_desc *)TASVIR_ADDR_ROOT_DESC;
+    ttld.root_desc = (tasvir_area_desc *)TASVIR_ADDR_ROOT_DESC;
     tasvir_area_desc *d_ret;
 
-    if (ttls.is_root) {
+    if (ttld.is_root) {
         d_ret = tasvir_new((tasvir_area_desc){.pd = NULL,
                                               .owner = NULL,
                                               .type = TASVIR_AREA_TYPE_CONTAINER,
@@ -564,17 +585,14 @@ static int tasvir_init_root() {
                                               .nr_areas_max = TASVIR_NR_AREAS_MAX,
                                               .stale_us = 50000});
     } else {
-        uint64_t end_time_us = tasvir_gettime_us() + 500 * 1000;
-        while (tasvir_gettime_us() < end_time_us && !(d_ret = tasvir_attach(NULL, "root", NULL))) {
-            rte_delay_ms(1);
-        }
+        d_ret = tasvir_attach_wait(NULL, "root", NULL, false, 500 * MS2US);
     }
 
     if (!d_ret || !d_ret->active) {
-        TASVIR_LOG("root not initialized\n")
+        LOG_DBG("root not initialized")
         return -1;
-    } else if (d_ret != ttls.root_desc) {
-        TASVIR_LOG("returned address doesn't match root_desc address\n")
+    } else if (d_ret != ttld.root_desc) {
+        LOG_DBG("returned address doesn't match root_desc address")
         return -1;
     }
 
@@ -584,12 +602,12 @@ static int tasvir_init_root() {
 static int tasvir_init_node() {
     /* FIXME: assuming a clean boot */
     tasvir_str name = "node-";
-    ether_format_addr(&name[strlen(name)], sizeof(name) - strlen(name), &ttls.nstate->mac_addr);
+    ether_format_addr(&name[strlen(name)], sizeof(name) - strlen(name), &ttld.ndata->mac_addr);
 
-    if (ttls.is_daemon) {
+    if (ttld.is_daemon) {
         /* id and address */
         /* initializing boot_us so that could be later use this node's clock rather than root's */
-        ttls.node_desc = tasvir_new((tasvir_area_desc){.pd = ttls.root_desc,
+        ttld.node_desc = tasvir_new((tasvir_area_desc){.pd = ttld.root_desc,
                                                        .owner = NULL,
                                                        .type = TASVIR_AREA_TYPE_NODE,
                                                        .name_static = *(tasvir_str_static *)name,
@@ -597,38 +615,35 @@ static int tasvir_init_node() {
                                                        .nr_areas_max = 0,
                                                        .boot_us = tasvir_gettime_us(),
                                                        .stale_us = 50000});
-        if (!ttls.node_desc) {
-            TASVIR_LOG("failed to allocate node\n");
+        if (!ttld.node_desc) {
+            LOG_DBG("failed to allocate node");
             return -1;
         }
-        ttls.node = tasvir_data(ttls.node_desc);
-        memset(ttls.node, 0, sizeof(tasvir_node));
-        ether_addr_copy(&ttls.nstate->mac_addr, &ttls.node->nid.mac_addr);
-        ttls.node->heartbeat_us = TASVIR_HEARTBEAT_US;
+        ttld.node = tasvir_data(ttld.node_desc);
+        memset(ttld.node, 0, sizeof(tasvir_node));
+        ether_addr_copy(&ttld.ndata->mac_addr, &ttld.node->nid.mac_addr);
+        ttld.node->heartbeat_us = TASVIR_HEARTBEAT_US;
 
         /* time */
-        tasvir_log_write(ttls.node, sizeof(tasvir_node));
+        tasvir_log_write(ttld.node, sizeof(tasvir_node));
     } else {
-        uint64_t end_time_us = tasvir_gettime_us() + 500 * 1000;
-        while (tasvir_gettime_us() < end_time_us && !(ttls.node_desc = tasvir_attach(ttls.root_desc, name, NULL)))
-            rte_delay_ms(1);
-        if (!ttls.node_desc->h->active) {
-            TASVIR_LOG("node not initiliazed yet\n");
+        ttld.node_desc = tasvir_attach_wait(ttld.root_desc, name, NULL, false, 500 * MS2US);
+        if (!ttld.node_desc || !ttld.node_desc->h->active) {
+            LOG_DBG("node not initiliazed yet");
             return -1;
         }
-        ttls.node = tasvir_data(ttls.node_desc);
+        ttld.node = tasvir_data(ttld.node_desc);
 
-        tasvir_local_tstate *daemon_tstate = &ttls.nstate->tstate[TASVIR_THREAD_DAEMON_IDX];
+        tasvir_local_tdata *daemon_tdata = &ttld.ndata->tdata[TASVIR_THREAD_DAEMON_IDX];
 
         /* daemon alive? */
         uint64_t time_us = tasvir_gettime_us();
-        if (!ttls.node_desc->active) {
-            TASVIR_LOG("daemon is inactive\n");
+        if (!ttld.node_desc->active) {
+            LOG_DBG("daemon is inactive");
             return -1;
-        } else if (time_us > daemon_tstate->update_us &&
-                   time_us - daemon_tstate->update_us > ttls.node_desc->stale_us) {
-            TASVIR_LOG("daemon has been stale for %lu us (> %lu), last activity %lu\n",
-                       time_us - ttls.node_desc->h->update_us, ttls.node_desc->stale_us, ttls.node_desc->h->update_us);
+        } else if (time_us > daemon_tdata->update_us && time_us - daemon_tdata->update_us > ttld.node_desc->stale_us) {
+            LOG_DBG("daemon has been stale for %lu us (> %lu), last activity %lu",
+                    time_us - ttld.node_desc->h->update_us, ttld.node_desc->stale_us, ttld.node_desc->h->update_us);
             return -1;
         }
     }
@@ -636,15 +651,16 @@ static int tasvir_init_node() {
     return 0;
 }
 
+/* run by daemon */
 static inline tasvir_thread *tasvir_init_thread(pid_t pid, uint16_t core, uint8_t type) {
     tasvir_thread *t = NULL;
 
-    if (ttls.is_daemon) {
-        uint16_t tid;
+    if (ttld.is_daemon) {
         /* find a free thread id */
+        uint16_t tid;
         for (tid = 0; tid < TASVIR_NR_THREADS_LOCAL; tid++) {
-            if (ttls.node->threads[tid].status != TASVIR_THREAD_STATUS_RUNNING &&
-                ttls.node->threads[tid].status != TASVIR_THREAD_STATUS_BOOTING)
+            if (ttld.ndata->tdata[tid].state != TASVIR_THREAD_STATE_RUNNING &&
+                ttld.ndata->tdata[tid].state != TASVIR_THREAD_STATE_BOOTING)
                 break;
         }
 
@@ -652,153 +668,162 @@ static inline tasvir_thread *tasvir_init_thread(pid_t pid, uint16_t core, uint8_
             return NULL;
 
         /* populate thread */
-        t = &ttls.node->threads[tid];
-        tasvir_log_write(t, sizeof(tasvir_thread));
+        t = &ttld.node->threads[tid];
         t->core = core;
         t->type = type;
-        t->tid.nid = ttls.node->nid;
+        t->tid.nid = ttld.node->nid;
         t->tid.idx = tid;
         t->tid.pid = pid;
-        t->status = TASVIR_THREAD_STATUS_BOOTING;
+        tasvir_log_write(t, sizeof(tasvir_thread));
 
-        tasvir_local_tstate *tstate = &ttls.nstate->tstate[tid];
+        tasvir_local_tdata *tdata = &ttld.ndata->tdata[tid];
         tasvir_str tmp;
         /* rings */
         sprintf(tmp, "tasvir_tx_%d", tid);
-        tstate->ring_tx =
+        tdata->ring_tx =
             rte_ring_create(tmp, TASVIR_RING_SIZE, rte_lcore_to_socket_id(core), RING_F_SP_ENQ | RING_F_SC_DEQ);
         sprintf(tmp, "tasvir_rx_%d", tid);
-        tstate->ring_rx =
+        tdata->ring_rx =
             rte_ring_create(tmp, TASVIR_RING_SIZE, rte_lcore_to_socket_id(core), RING_F_SP_ENQ | RING_F_SC_DEQ);
-        if (tstate->ring_tx == NULL || tstate->ring_rx == NULL) {
-            TASVIR_LOG("failed to create rings for tid %d", tid);
+        if (tdata->ring_tx == NULL || tdata->ring_rx == NULL) {
+            LOG_DBG("failed to create rings for tid %d", tid);
             return NULL;
         }
+        tdata->state = TASVIR_THREAD_STATE_BOOTING;
     } else {
         /* FIXME: deadlock on crash */
-        pthread_mutex_lock(&ttls.nstate->mutex_boot);
-        t = tasvir_rpc_sync(ttls.node_desc, 1 * 1000 * 1000, &rpc_tasvir_init_thread, pid, core, type);
-        pthread_mutex_unlock(&ttls.nstate->mutex_boot);
+        pthread_mutex_lock(&ttld.ndata->mutex_boot);
+        bool retval = tasvir_rpc_wait(S2US, (void **)&t, ttld.node_desc, &rpc_tasvir_init_thread, pid, core, type);
+        pthread_mutex_unlock(&ttld.ndata->mutex_boot);
+        if (!retval)
+            return NULL;
     }
 
-    if (t)
-        TASVIR_LOG("addr=%p tid=%d core=%d pid=%d status=%d\n", (void *)t, t->tid.idx, t->core, t->tid.pid, t->status);
+    LOG_DBG("addr=%p tid=%d core=%d pid=%d", (void *)t, t->tid.idx, t->core, t->tid.pid);
 
     return t;
 }
 
 static inline void tasvir_kill_thread_ownership(tasvir_thread *t, tasvir_area_desc *d) {
     if (d->type == TASVIR_AREA_TYPE_CONTAINER) {
-        tasvir_area_container c = tasvir_data(d);
+        tasvir_area_desc *c = tasvir_data(d);
         for (size_t i = 0; i < d->h->nr_areas; i++)
             tasvir_kill_thread_ownership(t, &c[i]);
     }
     if (d->owner == t)
-        tasvir_set_owner(d, NULL);
+        tasvir_update_owner(d, ttld.thread);
 }
 
+/* caller contract: assert(ttld.is_daemon && tasvir_is_thread_local(t)); */
 static inline void tasvir_kill_thread(tasvir_thread *t) {
-    assert(ttls.is_daemon && tasvir_is_thread_local(t));
-    tasvir_local_tstate *tstate = &ttls.nstate->tstate[t->tid.idx];
-    TASVIR_LOG("thread=%d idle_time=%zd remaining_threads=%lu\n", t->tid.idx, ttls.nstate->time_us - tstate->update_us,
-               ttls.node->nr_threads - 1);
-    tstate->sync = false;
-    tstate->update_us = 0;
+    tasvir_local_tdata *tdata = &ttld.ndata->tdata[t->tid.idx];
+    LOG_DBG("tid=%d inactive_time=%zd", t->tid.idx, ttld.ndata->time_us - tdata->update_us);
+    tdata->update_us = 0;
+    tdata->do_sync = false;
+    tdata->state = TASVIR_THREAD_STATE_DEAD;
+    rte_ring_free(tdata->ring_rx);
+    rte_ring_free(tdata->ring_tx);
 
     /* change ownership */
-    tasvir_kill_thread_ownership(t, ttls.root_desc);
+    tasvir_kill_thread_ownership(t, ttld.root_desc);
 
     /* kill by pid */
-    /* kill(t->tid.pid, SIGKILL); */
+    kill(t->tid.pid, SIGKILL);
 
-    ttls.node->nr_threads--;
-    tasvir_log_write(&ttls.node->nr_threads, sizeof(ttls.node->nr_threads));
-    t->status = TASVIR_THREAD_STATUS_DEAD;
-    tasvir_log_write(&t->status, sizeof(t->status));
-
-    rte_ring_free(ttls.nstate->tstate[t->tid.idx].ring_rx);
-    rte_ring_free(ttls.nstate->tstate[t->tid.idx].ring_tx);
+    // FIXME: node_desc must deactivate
+    t->active = false;
+    tasvir_log_write(&t->active, sizeof(t->active));
 }
 
-static inline void tasvir_init_finish(tasvir_thread *t) {
-    if (t->status != TASVIR_THREAD_STATUS_BOOTING) {
-        TASVIR_LOG("called from a thread that is not in the BOOTING state (status=%d)\n", t->status);
-        abort();
+static inline bool tasvir_init_finish(tasvir_thread *t) {
+    if (ttld.ndata->tdata[t->tid.idx].state != TASVIR_THREAD_STATE_BOOTING) {
+        LOG_DBG("called from a thread that is not in the BOOTING state");
+        return false;
     }
-    if (ttls.is_daemon) {
-        tasvir_log_write(&t->status, sizeof(t->status));
-        tasvir_log_write(&ttls.node->nr_threads, sizeof(ttls.node->nr_threads));
-        t->status = TASVIR_THREAD_STATUS_RUNNING;
-        ttls.node->nr_threads++;
+
+    if (ttld.is_daemon) {
+        t->active = true;
+        tasvir_log_write(&t->active, sizeof(t->active));
 
         /* backfill area owners */
-        if (t == ttls.thread) {
-            tasvir_log_write(&ttls.node_desc->owner, sizeof(tasvir_thread *));
-            if (ttls.is_root) {
-                ttls.node_desc->owner = ttls.thread;
-                tasvir_log_write(&ttls.root_desc->owner, sizeof(tasvir_thread *));
-                ttls.root_desc->owner = ttls.thread;
-            } else {
-                tasvir_set_owner(ttls.node_desc, ttls.thread);
+        if (t == ttld.thread) {
+            if (ttld.is_root) {
+                ttld.node_desc->owner = ttld.thread;
+                ttld.root_desc->owner = ttld.thread;
+                tasvir_log_write(&ttld.node_desc->owner, sizeof(ttld.node_desc->owner));
+                tasvir_log_write(&ttld.root_desc->owner, sizeof(ttld.root_desc->owner));
+            } else if (!tasvir_update_owner(ttld.node_desc, ttld.thread)) {
+                return false;
             }
         }
     } else {
-        tasvir_rpc_sync(ttls.node_desc, 1 * 1000 * 1000, &rpc_tasvir_init_finish, t);
+        bool retval;
+        if (!tasvir_rpc_wait(S2US, (void **)&retval, ttld.node_desc, &rpc_tasvir_init_finish, t) || !retval) {
+            return false;
+        }
     }
 
-    TASVIR_LOG("tid=%d core=%d pid=%d\n", t->tid.idx, t->core, t->tid.pid);
+    if (t == ttld.thread)
+        ttld.tdata->state = TASVIR_THREAD_STATE_RUNNING;
+
+    LOG_DBG("tid=%d core=%d pid=%d", t->tid.idx, t->core, t->tid.pid);
+    return true;
 }
 
 tasvir_area_desc *tasvir_init(uint8_t type, uint16_t core, char *pciaddr) {
-    assert(!ttls.node && !ttls.thread);
+    assert(!ttld.node && !ttld.thread);
 
-    memset(&ttls, 0, sizeof(tasvir_tls_state));
-    ttls.is_daemon = type == TASVIR_THREAD_TYPE_DAEMON || type == TASVIR_THREAD_TYPE_ROOT;
-    ttls.is_root = type == TASVIR_THREAD_TYPE_ROOT;
+    memset(&ttld, 0, sizeof(tasvir_tls_data));
+    ttld.is_daemon = type == TASVIR_THREAD_TYPE_DAEMON || type == TASVIR_THREAD_TYPE_ROOT;
+    ttld.is_root = type == TASVIR_THREAD_TYPE_ROOT;
 
     tasvir_init_rpc();
 
-    TASVIR_LOG("dpdk\n");
+    LOG_DBG("dpdk");
     if (tasvir_init_dpdk(core, pciaddr)) {
-        TASVIR_LOG("tasvir_init_dpdk failed\n");
+        LOG_DBG("tasvir_init_dpdk failed");
         return NULL;
     }
 
-    TASVIR_LOG("local\n");
+    LOG_DBG("local");
     if (tasvir_init_local()) {
-        TASVIR_LOG("tasvir_init_local failed\n");
+        LOG_DBG("tasvir_init_local failed");
         return NULL;
     }
 
-    TASVIR_LOG("port\n");
+    LOG_DBG("port");
     if (tasvir_init_port(pciaddr)) {
-        TASVIR_LOG("tasvir_init_port failed\n");
+        LOG_DBG("tasvir_init_port failed");
         return NULL;
     }
 
-    TASVIR_LOG("root\n");
+    LOG_DBG("root");
     if (tasvir_init_root()) {
-        TASVIR_LOG("tasvir_init_root failed\n");
+        LOG_DBG("tasvir_init_root failed");
         return NULL;
     }
 
-    TASVIR_LOG("node\n");
+    LOG_DBG("node");
     if (tasvir_init_node()) {
-        TASVIR_LOG("tasvir_init_node failed\n");
+        LOG_DBG("tasvir_init_node failed");
         return NULL;
     }
 
-    TASVIR_LOG("thread\n");
-    ttls.thread = tasvir_init_thread(getpid(), core, type);
-    if (!ttls.thread) {
-        TASVIR_LOG("tasvir_init_thread failed\n");
+    LOG_DBG("thread");
+    ttld.thread = tasvir_init_thread(getpid(), core, type);
+    if (!ttld.thread) {
+        LOG_DBG("tasvir_init_thread failed");
+        return NULL;
+    }
+    ttld.tdata = &ttld.ndata->tdata[ttld.thread->tid.idx];
+
+    LOG_DBG("finish");
+    if (!tasvir_init_finish(ttld.thread)) {
+        LOG_DBG("tasvir_init_finish failed");
         return NULL;
     }
 
-    TASVIR_LOG("finish\n");
-    tasvir_init_finish(ttls.thread);
-
-    return ttls.root_desc;
+    return ttld.root_desc;
 }
 
 /* area management */
@@ -806,54 +831,53 @@ tasvir_area_desc *tasvir_init(uint8_t type, uint16_t core, char *pciaddr) {
 tasvir_area_desc *tasvir_new(tasvir_area_desc desc) {
     desc.active = false;
     tasvir_area_desc *d = NULL;
-    tasvir_area_container c = NULL;
+    tasvir_area_desc *c = NULL;
     uint64_t time_us = tasvir_gettime_us();
     bool is_root_area = !desc.pd;
     bool is_desc_owner = tasvir_is_owner(desc.pd);
-    bool is_owner = desc.type == TASVIR_AREA_TYPE_NODE ? !ttls.node : tasvir_is_owner(&desc);
+    bool is_owner = desc.type == TASVIR_AREA_TYPE_NODE ? !ttld.node : tasvir_is_owner(&desc);
     bool is_container = desc.type == TASVIR_AREA_TYPE_CONTAINER;
 
     if ((is_container && desc.nr_areas_max == 0) || (!is_container && desc.nr_areas_max != 0)) {
-        TASVIR_LOG("mismatch between type and number of subareas (type=%s,nr_areas_max=%lu)\n",
-                   tasvir_area_type_str[desc.type], desc.nr_areas_max);
+        LOG_DBG("mismatch between type and number of subareas (type=%s,nr_areas_max=%lu)",
+                tasvir_area_type_str[desc.type], desc.nr_areas_max);
         return NULL;
     }
     if (!desc.owner && desc.type != TASVIR_AREA_TYPE_NODE)
-        desc.owner = ttls.thread;
+        desc.owner = ttld.thread;
     if ((is_root_area && !is_container) || (!is_root_area && desc.pd->type != TASVIR_AREA_TYPE_CONTAINER)) {
-        TASVIR_LOG("incorrect area type\n");
+        LOG_DBG("incorrect area type");
         return NULL;
     }
 
-    size_t i;
     size_t size_metadata = sizeof(tasvir_area_header) + desc.nr_areas_max * sizeof(tasvir_area_desc);
-    size_t size_data = desc.len;
-    size_t size_loggable = tasvir_size_loggable(&desc);
-    size_t size_log = TASVIR_ALIGNX((size_loggable >> TASVIR_SHIFT_BYTE), 8 * sizeof(tasvir_log_t));
-    desc.len = TASVIR_ALIGN((size_metadata + size_data)) + TASVIR_NR_AREA_LOGS * size_log;
+    desc.offset_log_end = TASVIR_ALIGN(size_metadata + !is_container * desc.len);
+    size_t offset_log = TASVIR_ALIGN(size_metadata + desc.len);
+    size_t size_log = TASVIR_ALIGNX(desc.offset_log_end >> TASVIR_SHIFT_BYTE, sizeof(tasvir_log_t));
+    desc.len = offset_log + TASVIR_ALIGN(TASVIR_NR_AREA_LOGS * size_log);
 
     assert(is_root_area || desc.pd->type == TASVIR_AREA_TYPE_CONTAINER);
     assert(!is_root_area || is_container);
 
-    /* initialize area descriptor */
+    /* initialize the area descriptor */
     if (is_desc_owner) {
         void *h = NULL;
         if (is_root_area) {
-            d = ttls.root_desc;
+            d = ttld.root_desc;
             h = (void *)TASVIR_ADDR_DATA;
         } else {
             c = tasvir_data(desc.pd);
 
             /* ensure enough descriptors */
             if (desc.pd->h->nr_areas >= desc.pd->nr_areas_max) {
-                TASVIR_LOG("out of descriptors\n");
+                LOG_DBG("out of descriptors");
                 return NULL;
             }
 
             /* ensure area does not exist */
-            for (i = 0; i < desc.pd->h->nr_areas; i++) {
+            for (size_t i = 0; i < desc.pd->h->nr_areas; i++) {
                 if (strncmp(c[i].name, desc.name, sizeof(tasvir_str)) == 0) {
-                    TASVIR_LOG("area exists\n");
+                    LOG_DBG("area exists");
                     return NULL;
                 }
             }
@@ -862,8 +886,8 @@ tasvir_area_desc *tasvir_new(tasvir_area_desc desc) {
             d = &c[*nr_areas];
             h = (void *)TASVIR_ALIGN((*nr_areas > 0 ? (uint8_t *)c[*nr_areas - 1].h + c[*nr_areas - 1].len
                                                     : (uint8_t *)c + desc.pd->nr_areas_max * sizeof(tasvir_area_desc)));
-            if ((uint8_t *)h + desc.len > (uint8_t *)desc.pd->h + desc.pd->len) {
-                TASVIR_LOG("out of space\n");
+            if ((uint8_t *)h + desc.len >= (uint8_t *)desc.pd->h->diff_log[0].data) {
+                LOG_DBG("out of space");
                 return NULL;
             }
             (*nr_areas)++;
@@ -875,101 +899,106 @@ tasvir_area_desc *tasvir_new(tasvir_area_desc desc) {
             d->boot_us = time_us;
         d->active = true;
         tasvir_log_write(d, sizeof(tasvir_area_desc));
-    } else {
-        d = tasvir_rpc_sync(desc.pd, 1 * 1000 * 1000, &rpc_tasvir_new, desc);
-    }
+    } else if (!tasvir_rpc_wait(S2US, (void **)&d, desc.pd, &rpc_tasvir_new, desc))
+        return NULL;
 
+    /* sanity check */
     if (!d || !d->active || !d->h) {
-        TASVIR_LOG("invalid descriptor: d=%p, d->active=%d, d->h=%p\n", (void *)d, d ? d->active : false,
-                   d ? (void *)d->h : NULL);
+        LOG_DBG("invalid descriptor: d=%p, d->active=%d, d->h=%p", (void *)d, d ? d->active : false,
+                d ? (void *)d->h : NULL);
         return NULL;
     }
 
+    /* initialize the header */
     if (is_owner) {
-        tasvir_set_owner(d, ttls.thread);
+        tasvir_update_va(d, true);
         memset(d->h, 0, size_metadata);
+        d->h->private_tag.rw = true;
+        d->h->private_tag.local = true;
         d->h->d = d;
-        d->h->version = 0;
+        d->h->version = 1;
         d->h->update_us = time_us;
         d->h->nr_areas = 0;
         d->h->nr_users = 1;
-        d->h->users[0].node = ttls.node;
+        d->h->users[0].node = ttld.node;
         d->h->users[0].version = 0;
-        for (i = 0; i < TASVIR_NR_AREA_LOGS; i++) {
+        for (size_t i = 0; i < TASVIR_NR_AREA_LOGS; i++) {
             tasvir_area_log *log = &d->h->diff_log[i];
             log->version_start = 0;
             log->version_end = 0;
-            log->ts_first_us = time_us;
-            log->ts_last_us = 0;
-            log->data = (tasvir_log_t *)((uint8_t *)d->h + d->len - (TASVIR_NR_AREA_LOGS - i) * size_log);
+            log->start_us = time_us;
+            log->end_us = 0;
+            log->data = (tasvir_log_t *)((uint8_t *)d->h + offset_log + i * size_log);
         }
         d->h->active = true;
-        tasvir_log_write(d->h, sizeof(tasvir_area_header));
+        tasvir_log_write(&d->h->d, sizeof(tasvir_area_header) - offsetof(tasvir_area_header, d));
     }
 
-    TASVIR_LOG(
-        "name=%s type=%s len=%lx stale_us=%lu boot_us=%lu nr_areas_max=%lu immediate=%s active=%s "
-        "d=%p pd=%p owner=%p h=%p is_desc_owner=%s is_owner=%s\n",
+    LOG_DBG(
+        "name=%s type=%s len=0x%lx stale_us=%lu boot_us=%lu nr_areas_max=%lu active=%s "
+        "d=%p pd=%p owner=%p h=%p is_desc_owner=%s is_owner=%s",
         d->name, tasvir_area_type_str[d->type], d->len, d->stale_us, d->boot_us, d->nr_areas_max,
-        d->immediate ? "true" : "false", d->active ? "true" : "false", (void *)d, (void *)d->pd, (void *)d->owner,
-        (void *)d->h, is_desc_owner ? "true" : "false", is_owner ? "true" : "false");
+        d->active ? "true" : "false", (void *)d, (void *)d->pd, (void *)d->owner, (void *)d->h,
+        is_desc_owner ? "true" : "false", is_owner ? "true" : "false");
 
     return d;
 }
 
+/* asssumption: d && d->pd */
 int tasvir_delete(tasvir_area_desc *d) {
-    /* TODO: sanity check (d, d->pd, etc) */
-
     /* TODO: remove from d->pd */
     if (tasvir_is_owner(d->pd)) {
         d->active = false;
+        return 0;
     } else {
-        return *(int *)tasvir_rpc_sync(d->pd, 1 * 1000 * 1000, &rpc_tasvir_delete, d);
+        int retval = -1;
+        if (!tasvir_rpc_wait(S2US, (void **)&retval, d->pd, &rpc_tasvir_delete, d)) {
+            return -1;
+        }
+        return retval;
     }
-    return 0;
 }
 
 static inline int tasvir_attach_helper(tasvir_area_desc *d, tasvir_node *node) {
-    if (tasvir_is_attached(d, node)) {
+    if (tasvir_is_attached(d, node))
         return 0;
-    }
 
     if (tasvir_is_owner(d)) {
         if (d->h->nr_users >= TASVIR_NR_NODES_AREA) {
-            TASVIR_LOG("%s has reached max number of subscribers\n", d->name);
+            LOG_DBG("%s has reached max number of subscribers", d->name);
             return -1;
         }
 
-        tasvir_log_write(&d->h->users[d->h->nr_users], sizeof(tasvir_area_user));
         if (node) {
             d->h->users[d->h->nr_users].node = node;
             d->h->users[d->h->nr_users].version = 0;
             d->h->nr_users++;
+            tasvir_log_write(&d->h->users[d->h->nr_users], sizeof(tasvir_area_user));
         }
 
         tasvir_sync_area_external_boot(d, true);
         /* FIXME: hack to receive thread id info */
-        if (d == ttls.root_desc) {
-            tasvir_area_container c = tasvir_data(d);
+        if (d == ttld.root_desc) {
+            tasvir_area_desc *c = tasvir_data(d);
             for (size_t i = 0; i < d->h->nr_areas; i++)
                 if (c[i].type == TASVIR_AREA_TYPE_NODE)
                     tasvir_sync_area_external_boot(&c[i], true);
         }
-    } else if (ttls.thread) {
-        tasvir_rpc_sync(d, 1 * 1000 * 1000, &rpc_tasvir_attach_helper, d, node);
+    } else if (ttld.thread && !tasvir_rpc_wait(S2US, NULL, d, &rpc_tasvir_attach_helper, d, node)) {
+        return -1;
     }
 
     return !tasvir_is_attached(d, node);
 }
 
-tasvir_area_desc *tasvir_attach(tasvir_area_desc *pd, const char *name, tasvir_node *node) {
-    /* TODO: sanity checking? */
+/* TODO: sanity checking? */
+tasvir_area_desc *tasvir_attach(tasvir_area_desc *pd, const char *name, tasvir_node *node, bool writer) {
     tasvir_area_desc *d = NULL;
 
     if (!pd) /* root_area */
-        d = ttls.root_desc;
+        d = ttld.root_desc;
     else if (pd->active && pd->type == TASVIR_AREA_TYPE_CONTAINER && pd->h && pd->h->active) {
-        tasvir_area_container c = tasvir_data(pd);
+        tasvir_area_desc *c = tasvir_data(pd);
         for (size_t i = 0; i < pd->h->nr_areas; i++) {
             if (strncmp(c[i].name, name, sizeof(tasvir_str)) == 0) {
                 d = &c[i];
@@ -982,13 +1011,25 @@ tasvir_area_desc *tasvir_attach(tasvir_area_desc *pd, const char *name, tasvir_n
     if (!(d && d->active && d->h && d->owner))
         return NULL;
 
-    if (!d->h->active)
-        tasvir_attach_helper(d, node ? node : ttls.node);
+    if (!d->h->active && !tasvir_is_thread_local(d->owner))
+        tasvir_attach_helper(d, node ? node : ttld.node);
 
     if (!d->h->active)
         return NULL;
 
-    TASVIR_LOG("name=%s len=%lu h=%p\n", d->name, d->len, (void *)d->h);
+    tasvir_update_va(d, writer);
+    LOG_DBG("name=%s len=%lu h=%p", d->name, d->len, (void *)d->h);
+    return d;
+}
+
+tasvir_area_desc *tasvir_attach_wait(tasvir_area_desc *pd, const char *name, tasvir_node *node, bool writer,
+                                     uint64_t timeout_us) {
+    tasvir_area_desc *d;
+    uint64_t end_time_us = tasvir_gettime_us() + timeout_us;
+    while (tasvir_gettime_us() < end_time_us && !(d = tasvir_attach(pd, name, node, writer))) {
+        tasvir_service();
+        rte_delay_us(1);
+    }
     return d;
 }
 
@@ -999,38 +1040,37 @@ int tasvir_detach(tasvir_area_desc *d) {
     return 0;
 }
 
-void tasvir_set_owner(tasvir_area_desc *d, tasvir_thread *owner) {
+bool tasvir_update_owner(tasvir_area_desc *d, tasvir_thread *owner) {
     tasvir_thread *desc_owner = d->pd ? d->pd->owner : d->owner;
-    bool is_new_owner = owner == ttls.thread;
-    bool is_old_owner = d->owner == ttls.thread;
-    bool is_desc_owner = desc_owner == ttls.thread;
-    void *base = d->h;
-    void *base_shadow = tasvir_data2shadow(base);
+    bool is_new_owner = owner == ttld.thread;
+    bool is_old_owner = d->owner == ttld.thread;
+    bool is_desc_owner = desc_owner == ttld.thread;
+
+    if (is_new_owner) {
+        tasvir_update_va(d, true);
+        /* FIXME: error reporting and function return value */
+        /* FIXME: change to async and wait for change to propagate */
+
+        if (!is_old_owner) {
+            /* rpc to previous owner */
+            if (!tasvir_rpc_wait(S2US, NULL, d, &rpc_tasvir_update_owner, d, owner))
+                return false;
+
+            /* rpc to desc owner */
+            if (d->pd && !is_desc_owner && !tasvir_rpc_wait(S2US, NULL, d->pd, &rpc_tasvir_update_owner, d, owner))
+                return false;
+        }
+    } else if (is_old_owner) {
+        /* restore the mappings of the old owner */
+        tasvir_update_va(d, false);
+    }
 
     if (is_desc_owner) {
         d->owner = owner;
         tasvir_log_write(&d->owner, sizeof(d->owner));
     }
 
-    if (!d->immediate) {
-        if (is_new_owner) {
-            tasvir_change_vaddr(base, base_shadow, tasvir_size_loggable(d), true);
-
-            /* FIXME: change to async and wait for change to propagate */
-            if (d->owner && !is_old_owner) {
-                /* rpc to previous owner */
-                tasvir_rpc_sync(d, 1 * 1000 * 1000, &rpc_tasvir_set_owner, d, owner);
-            }
-
-            if (desc_owner && !is_desc_owner) {
-                /* rpc to desc owner */
-                tasvir_rpc_sync(d->pd, 1 * 1000 * 1000, &rpc_tasvir_set_owner, d, owner);
-            }
-        } else if (is_old_owner) {
-            /* restore the mappings of the old owner */
-            tasvir_change_vaddr(base, base_shadow, tasvir_size_loggable(d), false);
-        }
-    }
+    return true;
 }
 
 /* rpc */
@@ -1038,54 +1078,53 @@ void tasvir_set_owner(tasvir_area_desc *d, tasvir_thread *owner) {
 /* return 0 if message sent out */
 static int tasvir_route_msg(tasvir_msg *msg, bool inbound) {
     /* destination broadcast is only meant for the root daemon */
-    bool is_dst_any = tasvir_tid_match(&msg->dst_tid, TASVIR_TID_BROADCAST);
-    bool is_dst_update = tasvir_tid_match(&msg->dst_tid, TASVIR_TID_UPDATE);
-    bool is_dst_local = is_dst_any ? ttls.is_root || msg->type == TASVIR_MSG_TYPE_MEM
-                                   : is_dst_update || tasvir_tid_match(&msg->dst_tid, TASVIR_TID_LOCAL);
-    bool is_dst_me = inbound && is_dst_local && ((is_dst_any && ttls.is_root) || (is_dst_update && ttls.is_daemon) ||
-                                                 !ttls.thread || msg->dst_tid.idx == ttls.thread->tid.idx);
+    bool is_dst_any = tasvir_tid_match(msg->dst_tid, TASVIR_TID_BROADCAST);
+    bool is_dst_update = tasvir_tid_match(msg->dst_tid, TASVIR_TID_UPDATE);
+    bool is_dst_local = is_dst_any ? ttld.is_root || msg->type == TASVIR_MSG_TYPE_MEM
+                                   : is_dst_update || tasvir_tid_match(msg->dst_tid, TASVIR_TID_LOCAL);
+    bool is_dst_me = inbound && is_dst_local && ((is_dst_any && ttld.is_root) || (is_dst_update && ttld.is_daemon) ||
+                                                 !ttld.thread || msg->dst_tid.idx == ttld.thread->tid.idx);
     struct rte_ring *r;
 
-    if (is_dst_me || (inbound && !ttls.is_daemon)) {
+    if (is_dst_me || (inbound && !ttld.is_daemon)) {
         /* no-op when message is ours or reached here by error */
         return -1;
-    } else if (ttls.is_daemon) {
+    } else if (ttld.is_daemon) {
         uint16_t tid = msg->dst_tid.idx == (uint16_t)(-1) ? TASVIR_THREAD_DAEMON_IDX : msg->dst_tid.idx;
-        r = is_dst_local ? ttls.nstate->tstate[tid].ring_rx : ttls.nstate->ring_ext_tx;
+        r = is_dst_local ? ttld.ndata->tdata[tid].ring_rx : ttld.ndata->ring_ext_tx;
     } else {
-        uint16_t tid = ttls.thread ? ttls.thread->tid.idx : TASVIR_THREAD_DAEMON_IDX;
-        r = ttls.nstate->tstate[tid].ring_tx;
+        uint16_t tid = ttld.thread ? ttld.thread->tid.idx : TASVIR_THREAD_DAEMON_IDX;
+        r = ttld.ndata->tdata[tid].ring_tx;
     }
 
     if (rte_ring_sp_enqueue(r, msg) != 0) {
-        TASVIR_LOG("rte_ring_sp_enqueue failed\n");
-        rte_mempool_put(ttls.nstate->mp, (void *)msg);
-        abort();
+        LOG_DBG("rte_ring_sp_enqueue failed");
+        rte_mempool_put(ttld.ndata->mp, (void *)msg);
         return -1;
     }
 
     return 0;
 }
 
-static tasvir_rpc_status *tasvir_vrpc_async(tasvir_area_desc *d, tasvir_fnptr fnptr, va_list argp) {
+static tasvir_rpc_status *tasvir_vrpc(tasvir_area_desc *d, tasvir_fnptr fnptr, va_list argp) {
     int i;
     uint8_t *ptr;
     tasvir_msg_rpc *msg;
-    if (rte_mempool_get(ttls.nstate->mp, (void **)&msg)) {
-        TASVIR_LOG("rte_mempool_get failed\n");
+    if (rte_mempool_get(ttld.ndata->mp, (void **)&msg)) {
+        LOG_DBG("rte_mempool_get failed");
         return NULL;
     }
 
     tasvir_fn_info *fni;
-    HASH_FIND(h_fnptr, ttls.ht_fnptr, &fnptr, sizeof(fnptr), fni);
+    HASH_FIND(h_fnptr, ttld.ht_fnptr, &fnptr, sizeof(fnptr), fni);
     assert(fni);
 
     /* FIXME: using daemon id as src during boot to simplify impl */
-    msg->h.src_tid = ttls.thread ? ttls.thread->tid : ttls.nstate->nodecast_tid;
-    msg->h.dst_tid = d && d->owner ? d->owner->tid : ttls.nstate->broadcast_tid;
-    msg->h.id = ttls.nr_msgs++;
+    msg->h.src_tid = ttld.thread ? ttld.thread->tid : ttld.ndata->nodecast_tid;
+    msg->h.dst_tid = d && d->owner ? d->owner->tid : ttld.ndata->broadcast_tid;
+    msg->h.id = ttld.nr_msgs++;
     msg->h.type = TASVIR_MSG_TYPE_RPC_REQUEST;
-    msg->h.time_us = d && d->h ? d->h->update_us : ttls.nstate->time_us;
+    msg->h.time_us = d && d->h ? d->h->update_us : ttld.ndata->time_us;
     msg->d = d;
     msg->fid = fni->fid;
     ptr = &msg->data[TASVIR_ALIGN_ARG(fni->ret_len)];
@@ -1109,7 +1148,7 @@ static tasvir_rpc_status *tasvir_vrpc_async(tasvir_area_desc *d, tasvir_fnptr fn
             if (fni->arg_lens[i] <= sizeof(tasvir_arg_promo_t)) {
                 *(tasvir_arg_promo_t *)ptr = va_arg(argp, int);
             } else {
-                TASVIR_LOG("missing support for argument of len=%lu\n", fni->arg_lens[i]);
+                LOG_DBG("missing support for argument of len=%lu", fni->arg_lens[i]);
                 abort();
             }
             break;
@@ -1123,10 +1162,10 @@ static tasvir_rpc_status *tasvir_vrpc_async(tasvir_area_desc *d, tasvir_fnptr fn
         return NULL;
     }
 
-    tasvir_rpc_status *rs = &ttls.status_l[msg->h.id];
+    tasvir_rpc_status *rs = &ttld.status_l[msg->h.id];
     /* garbage collect a previous status */
     if (rs->response)
-        rte_mempool_put(ttls.nstate->mp, (void *)rs->response);
+        rte_mempool_put(ttld.ndata->mp, (void *)rs->response);
     rs->id = msg->h.id;
     rs->status = TASVIR_RPC_STATUS_PENDING;
     rs->response = NULL;
@@ -1134,107 +1173,118 @@ static tasvir_rpc_status *tasvir_vrpc_async(tasvir_area_desc *d, tasvir_fnptr fn
     return rs;
 }
 
-tasvir_rpc_status *tasvir_rpc_async(tasvir_area_desc *d, tasvir_fnptr fnptr, ...) {
+tasvir_rpc_status *tasvir_rpc(tasvir_area_desc *d, tasvir_fnptr fnptr, ...) {
     va_list argp;
     va_start(argp, fnptr);
-    tasvir_rpc_status *rs = tasvir_vrpc_async(d, fnptr, argp);
+    tasvir_rpc_status *rs = tasvir_vrpc(d, fnptr, argp);
     va_end(argp);
     return rs;
 }
 
-void *tasvir_rpc_sync(tasvir_area_desc *d, uint64_t timeout_us, tasvir_fnptr fnptr, ...) {
+bool tasvir_rpc_wait(uint64_t timeout_us, void **retval, tasvir_area_desc *d, tasvir_fnptr fnptr, ...) {
     bool done = false;
+    bool failed = false;
     uint64_t end_time_us = tasvir_gettime_us() + timeout_us;
     va_list argp;
     va_start(argp, fnptr);
-    tasvir_rpc_status *rs = tasvir_vrpc_async(d, fnptr, argp);
+    tasvir_rpc_status *rs = tasvir_vrpc(d, fnptr, argp);
     va_end(argp);
+    if (!rs)
+        return false;
 
     /* FIXME: horrible error handling */
-    while (!done && ttls.nstate->time_us < end_time_us) {
+    while (tasvir_gettime_us() < end_time_us && !done && !failed) {
         switch (rs->status) {
         case TASVIR_RPC_STATUS_INVALID:
         case TASVIR_RPC_STATUS_FAILED:
-            return NULL;
+            failed = true;
+            break;
         case TASVIR_RPC_STATUS_PENDING:
             break;
         case TASVIR_RPC_STATUS_DONE:
             if (!(rs->response && rs->response->d && rs->response->d->h)) {
-                TASVIR_LOG("bad response\n");
-                return NULL;
+                LOG_DBG("bad response");
+                failed = true;
+                break;
             }
-            /* FIXME: find a better way to ensure state is visible */
-            done = (rs->response->d->h->update_us >= rs->response->h.time_us) ||
-                   (rs->response->d->immediate && tasvir_is_thread_local(rs->response->d->owner));
+            /* FIXME: find a better way to ensure state is visible. what if attached to writer view? */
+            /* || (rs->response->d->immediate && tasvir_is_thread_local(rs->response->d->owner)); */
+            done = rs->response->d->h->update_us >= rs->response->h.time_us;
             break;
         default:
-            TASVIR_LOG("invalid rpc status %d\n", rs->status);
-            return NULL;
+            LOG_DBG("invalid rpc status %d", rs->status);
+            failed = true;
         }
         tasvir_service();
     }
 
     if (!done) {
-        TASVIR_LOG("failed (status=%d h=%p update_us=%lu expected_us=%lu)\n", rs->status,
-                   rs->response ? (void *)rs->response->d->h : NULL, rs->response ? rs->response->d->h->update_us : 0,
-                   rs->response ? rs->response->h.time_us : 0);
-        return NULL;
-    } else
-        return *(void **)rs->response->data;
+        LOG_DBG("failed (status=%d h=%p update_us=%lu expected_us=%lu)", rs->status,
+                rs->response ? (void *)rs->response->d->h : NULL, rs->response ? rs->response->d->h->update_us : 0,
+                rs->response ? rs->response->h.time_us : 0);
+        return false;
+    }
+
+    if (retval) {
+        tasvir_fn_info *fni;
+        HASH_FIND(h_fid, ttld.ht_fid, &rs->response->fid, sizeof(rs->response->fid), fni);
+        memcpy(retval, rs->response->data, fni->ret_len);
+    }
+    return true;
 }
 
 int tasvir_rpc_register(tasvir_fn_info *fni) {
     int i;
-    ttls.fn_infos[ttls.nr_fns] = *fni;
-    fni = &ttls.fn_infos[ttls.nr_fns];
+    ttld.fn_infos[ttld.nr_fns] = *fni;
+    fni = &ttld.fn_infos[ttld.nr_fns];
     ptrdiff_t ptr = TASVIR_ALIGN_ARG(fni->ret_len);
     for (i = 0; i < fni->argc; i++) {
         fni->arg_offsets[i] = ptr;
         ptr += TASVIR_ALIGN_ARG(fni->arg_lens[i]);
     }
-    HASH_ADD(h_fid, ttls.ht_fid, fid, sizeof(fni->fid), &ttls.fn_infos[ttls.nr_fns]);
-    HASH_ADD(h_fnptr, ttls.ht_fnptr, fnptr, sizeof(fni->fnptr), &ttls.fn_infos[ttls.nr_fns]);
-    ttls.nr_fns++;
+    HASH_ADD(h_fid, ttld.ht_fid, fid, sizeof(fni->fid), &ttld.fn_infos[ttld.nr_fns]);
+    HASH_ADD(h_fnptr, ttld.ht_fnptr, fnptr, sizeof(fni->fnptr), &ttld.fn_infos[ttld.nr_fns]);
+    ttld.nr_fns++;
     return 0;
 }
 
 static void tasvir_service_rpc_request(tasvir_msg_rpc *msg) {
     tasvir_fn_info *fni;
-    HASH_FIND(h_fid, ttls.ht_fid, &msg->fid, sizeof(msg->fid), fni);
+    HASH_FIND(h_fid, ttld.ht_fid, &msg->fid, sizeof(msg->fid), fni);
     assert(fni);
 
     /* convert the message into a response */
     msg->h.dst_tid = msg->h.src_tid;
-    msg->h.src_tid = ttls.thread ? ttls.thread->tid : ttls.nstate->nodecast_tid;
+    msg->h.src_tid = ttld.thread ? ttld.thread->tid : ttld.ndata->nodecast_tid;
     msg->h.type = TASVIR_MSG_TYPE_RPC_RESPONSE;
     /* receiver compares time_us with update_us of the area to ensure it includes the updates due to this msg */
-    msg->h.time_us = ttls.nstate->time_us;
+    msg->h.time_us = ttld.ndata->time_us;
     tasvir_print_msg_rpc_info(msg, false);
 
     /* execute the function */
     fni->fnptr(msg->data, fni->arg_offsets);
 
     if (tasvir_route_msg((tasvir_msg *)msg, false) != 0) {
-        TASVIR_LOG("FIXME: message not sent out!\n");
+        LOG_DBG("FIXME: message not sent out!");
     }
 }
 
 static void tasvir_service_rpc_response(tasvir_msg_rpc *msg) {
     assert(msg->h.id < TASVIR_NR_RPC_MSG);
-    tasvir_rpc_status *rs = &ttls.status_l[msg->h.id];
+    tasvir_rpc_status *rs = &ttld.status_l[msg->h.id];
     rs->status = TASVIR_RPC_STATUS_DONE;
     rs->response = msg;
 }
 
 static void tasvir_service_msg_mem(tasvir_msg_mem *msg) {
     /* TODO: log_write and sync */
-    ttls.nstate->sync_stats_cur.cumbytes_rx += msg->len;
-    ttls.nstate->sync_stats_cur.cumpkts_rx++;
+    ttld.ndata->sync_stats_cur.cumbytes_rx += msg->len;
+    ttld.ndata->sync_stats_cur.cumpkts_rx++;
     tasvir_mov32blocks_stream(tasvir_data2shadow(msg->addr), msg->line, msg->len);
     tasvir_log_write(msg->addr, msg->len);
-    if (!ttls.thread)
+    if (!ttld.thread)
         tasvir_mov32blocks_stream(msg->addr, msg->line, msg->len);
-    rte_mempool_put(ttls.nstate->mp, (void *)msg);
+    rte_mempool_put(ttld.ndata->mp, (void *)msg);
 }
 
 static void tasvir_service_msg(tasvir_msg *msg) {
@@ -1251,7 +1301,7 @@ static void tasvir_service_msg(tasvir_msg *msg) {
     } else if (msg->type == TASVIR_MSG_TYPE_MEM) {
         tasvir_service_msg_mem((tasvir_msg_mem *)msg);
     } else {
-        TASVIR_LOG("received an unrecognized message type %d\n", msg->type);
+        LOG_DBG("received an unrecognized message type %d", msg->type);
     }
 }
 
@@ -1259,23 +1309,23 @@ static void tasvir_service_port() {
     tasvir_msg *msg[TASVIR_RING_SIZE];
     unsigned int count, i, retval;
 
-    while ((count = rte_eth_rx_burst(ttls.nstate->port_id, 0, (struct rte_mbuf **)msg, TASVIR_RING_SIZE)) > 0) {
+    while ((count = rte_eth_rx_burst(ttld.ndata->port_id, 0, (struct rte_mbuf **)msg, TASVIR_RING_SIZE)) > 0) {
         for (i = 0; i < count; i++) {
             tasvir_service_msg(msg[i]);
         }
     }
 
-    while ((count = rte_ring_sc_dequeue_burst(ttls.nstate->ring_ext_tx, (void **)msg, TASVIR_RING_SIZE, NULL)) > 0) {
+    while ((count = rte_ring_sc_dequeue_burst(ttld.ndata->ring_ext_tx, (void **)msg, TASVIR_RING_SIZE, NULL)) > 0) {
         for (i = 0; i < count; i++) {
             struct ether_hdr *eh = &msg[i]->eh;
             ether_addr_copy(&msg[i]->dst_tid.nid.mac_addr, &eh->d_addr);
-            ether_addr_copy(&ttls.nstate->mac_addr, &eh->s_addr);
+            ether_addr_copy(&ttld.ndata->mac_addr, &eh->s_addr);
             eh->ether_type = rte_cpu_to_be_16(TASVIR_ETH_PROTO);
         }
 
         i = 0;
         do {
-            retval = rte_eth_tx_burst(ttls.nstate->port_id, 0, (struct rte_mbuf **)&msg[i], count - i);
+            retval = rte_eth_tx_burst(ttld.ndata->port_id, 0, (struct rte_mbuf **)&msg[i], count - i);
             i += retval;
         } while (i < count);
     }
@@ -1296,66 +1346,60 @@ static void tasvir_service_ring(struct rte_ring *ring) {
 
 /* sync */
 static inline void tasvir_schedule_sync(tasvir_area_desc *d) {
-    if (d->immediate && tasvir_is_thread_local(d->owner))
+    if (!d->owner)
         return;
 
-    tasvir_area_header *h = tasvir_is_owner(d) ? d->h : tasvir_data2shadow(d->h);
-    if (!h->active)
+    tasvir_area_header *h_new = tasvir_is_mapped_rw(d) ? d->h : tasvir_data2shadow(d->h);
+    if (!h_new->active)
         return;
 
-    size_t len = tasvir_size_loggable(d);
-    size_t len_this = 0;
-    size_t offset = 0;
-
-    while (len > 0) {
-        if (ttls.nstate->nr_jobs >= TASVIR_NR_SYNC_JOBS) {
-            TASVIR_LOG("more jobs than free slots\n");
-            abort();
-        }
-        len_this = TASVIR_MIN(len, TASVIR_SYNC_JOB_BYTES);
-        tasvir_sync_job *j = &ttls.nstate->jobs[ttls.nstate->nr_jobs];
-        j->d = d;
-        j->offset = offset;
-        j->len = len_this;
-        j->old_version = h->version;
-        j->bytes_changed = 0;
-
-        ttls.nstate->nr_jobs++;
-        offset += len_this;
-        len -= len_this;
+    if (ttld.ndata->nr_jobs >= TASVIR_NR_SYNC_JOBS) {
+        LOG_DBG("more jobs than free slots");
+        abort();
     }
+    tasvir_sync_job *j = &ttld.ndata->jobs[ttld.ndata->nr_jobs];
+    j->d = d;
+    j->done = false;
+    atomic_init(&j->offset, 0);
+    atomic_init(&j->bytes_seen, 0);
+    atomic_init(&j->bytes_updated, 0);
+
+    ttld.ndata->nr_jobs++;
 }
 
 static inline void tasvir_walk_areas(tasvir_area_desc *d, tasvir_area_desc_cb_fnptr fnptr) {
+    if (!d->active)
+        return;
+    fnptr(d);
     if (d->type == TASVIR_AREA_TYPE_CONTAINER) {
-        tasvir_area_container c = tasvir_data(d);
-        for (size_t i = 0; i < d->h->nr_areas; i++)
+        tasvir_area_desc *c = tasvir_data(d);
+        for (size_t i = 0; i < d->h->nr_areas; i++) {
             tasvir_walk_areas(&c[i], fnptr);
+        }
     }
-    if (d->active)
-        fnptr(d);
 }
 
-// FIXME: expects len to be aligned
-static inline size_t tasvir_sync_job_helper_copy(uint8_t *src, tasvir_log_t *log_internal, size_t len, bool is_owner) {
+/* FIXME: expects len to be aligned */
+static inline size_t __attribute__((hot))
+tasvir_sync_job_run_helper(uint8_t *src, tasvir_log_t *log_internal, size_t len, bool is_rw) {
     size_t nbits0 = 0;
     size_t nbits1 = 0;
     size_t nbits1_seen = 0;
     size_t nbits_seen = 0;
     size_t nbits_total = len >> TASVIR_SHIFT_BIT;
     uint8_t nbits_same;
-    uint8_t nbits_unit_left = TASVIR_MIN(TASVIR_LOG_UNIT_BITS, nbits_total);
+    uint8_t nbits_unit_left = MIN(TASVIR_LOG_UNIT_BITS, nbits_total);
 
     tasvir_log_t *log = tasvir_data2log(src);
     tasvir_log_t log_val = *log;
 
-    uint8_t *dst = is_owner ? tasvir_data2shadow(src) : src;
-    src = is_owner ? src : tasvir_data2shadow(src);
+    uint8_t *dst = is_rw ? tasvir_data2shadow(src) : src;
+    src = is_rw ? src : tasvir_data2shadow(src);
 
     while (nbits_total > nbits_seen) {
         nbits_same = _lzcnt_u64(log_val);
         if (nbits_same > 0) {
-            nbits_same = TASVIR_MIN(nbits_unit_left, nbits_same);
+            nbits_same = MIN(nbits_unit_left, nbits_same);
             nbits_seen += nbits_same;
             nbits0 += nbits_same;
             nbits_unit_left -= nbits_same;
@@ -1374,7 +1418,7 @@ static inline size_t tasvir_sync_job_helper_copy(uint8_t *src, tasvir_log_t *log
             }
 
             nbits_same = _lzcnt_u64(~log_val);
-            nbits_same = TASVIR_MIN(nbits_unit_left, nbits_same);
+            nbits_same = MIN(nbits_unit_left, nbits_same);
             nbits_seen += nbits_same;
             nbits1 += nbits_same;
             nbits1_seen += nbits_same;
@@ -1383,7 +1427,7 @@ static inline size_t tasvir_sync_job_helper_copy(uint8_t *src, tasvir_log_t *log
         }
 
         if (nbits_unit_left == 0) {
-            nbits_unit_left = TASVIR_MIN(TASVIR_LOG_UNIT_BITS, nbits_total - nbits_seen);
+            nbits_unit_left = MIN(TASVIR_LOG_UNIT_BITS, nbits_total - nbits_seen);
             if (log_internal) {
                 *log_internal |= *log;
                 log_internal++;
@@ -1401,66 +1445,77 @@ static inline size_t tasvir_sync_job_helper_copy(uint8_t *src, tasvir_log_t *log
     return nbits1_seen << TASVIR_SHIFT_BIT;
 }
 
-static inline void tasvir_sync_job_run(tasvir_sync_job *j) {
-    size_t bytes = 0;
+/* returns true if the job is done */
+static inline bool __attribute__((hot)) tasvir_sync_job_run(tasvir_sync_job *j) {
+    if (j->done)
+        return true;
 
-    /* FIXME: find the more recent desc */
-    bool is_local = tasvir_is_thread_local(j->d->owner);
-    bool is_owner = tasvir_is_owner(j->d);
-    tasvir_area_header *h = is_owner ? j->d->h : tasvir_data2shadow(j->d->h);
+    size_t seen = 0;
+    size_t updated = 0;
+    size_t offset;
+    bool is_rw = tasvir_is_mapped_rw(j->d);
+    tasvir_area_header *h_new = is_rw ? j->d->h : tasvir_data2shadow(j->d->h);
+    tasvir_log_t *log_base = tasvir_is_thread_local(j->d->owner) ? h_new->diff_log[0].data : NULL;
+    tasvir_log_t *log;
 
-    if (!h || !h->active || h->d != j->d)
-        abort();
-
-    bytes += tasvir_sync_job_helper_copy((uint8_t *)j->d->h + j->offset,
-                                         is_local ? h->diff_log[0].data + (j->offset >> TASVIR_SHIFT_UNIT) : NULL,
-                                         j->len, is_owner);
-
-    if (bytes > 0 && is_local) {
-        /* race doesn't matter because everyone is trying to update version to the same value */
-        tasvir_area_header *h2 = is_owner ? tasvir_data2shadow(j->d->h) : j->d->h;
-        tasvir_log_write(&h->version, sizeof(h->update_us) + sizeof(h->update_us));
-        h->version = h->diff_log[0].version_end = h2->diff_log[0].version_end = j->old_version + 1;
-        h->update_us = h->diff_log[0].ts_last_us = h2->diff_log[0].ts_last_us = ttls.nstate->time_us;
-        // FIXME: must change this if version and update_us were not consecutive
-        bytes += tasvir_sync_job_helper_copy((uint8_t *)j->d->h, h->diff_log[0].data, j->len, is_owner);
-        /* tasvir_memset_stream(tasvir_data2log((uint8_t *)d->h + j->offset), 0, j->len >> TASVIR_SHIFT_BYTE); */
+    while ((offset = atomic_fetch_add(&j->offset, TASVIR_SYNC_JOB_BYTES)) < j->d->offset_log_end) {
+        size_t len = MIN(TASVIR_SYNC_JOB_BYTES, j->d->offset_log_end - offset);
+        seen += len;
+        log = log_base ? log_base + (offset >> TASVIR_SHIFT_UNIT) : NULL;
+        updated += tasvir_sync_job_run_helper((uint8_t *)j->d->h + offset, log, len, is_rw);
     }
 
-    j->bytes_changed = bytes;
+    if (seen) {
+        size_t seen_before = atomic_fetch_add(&j->bytes_seen, seen);
+        if (updated)
+            updated += atomic_fetch_add(&j->bytes_updated, updated);
+        if (seen + seen_before == j->d->offset_log_end) {
+            if (updated || atomic_load_explicit(&j->bytes_updated, memory_order_relaxed)) {
+                tasvir_area_header *h_old = is_rw ? tasvir_data2shadow(j->d->h) : j->d->h;
+                h_old->update_us = h_new->update_us = h_new->diff_log[0].end_us = ttld.ndata->time_us;
+                h_old->version = h_new->diff_log[0].version_end = h_new->version;
+                h_new->version++;
+                // *(tasvir_log_t *)h_new->diff_log[0].data |= 2; /* mark second cacheline modified */
+            }
+            j->done = true;
+        }
+    }
+
+    return j->done;
 }
 
 static inline void tasvir_service_sync_prepare() {
-    if (!ttls.node)
-        abort();
+    size_t nr_threads = 0;
 
     /* heartbeat: declare unresponsive threads dead */
-    for (size_t i = 0; i < TASVIR_NR_THREADS_LOCAL; i++) {
-        if (ttls.node->threads[i].status != TASVIR_THREAD_STATUS_RUNNING)
-            continue;
-        // FIXME: add crash timeout
-        while (ttls.nstate->tstate[i].sync)
-            rte_delay_us_block(1);
-        /*
-        // FIXME
-        if (ttls.nstate->time_us - ttls.nstate->tstate[i].update_us > ttls.node->heartbeat_us) {
-            TASVIR_LOG("thread %d has been inactive for %dms\n", i,
-                       ttls.nstate->time_us - ttls.nstate->tstate[i].update_us);
-            tasvir_kill_thread(&ttls.node->threads[i]);
+    for (size_t tid = 0; tid < TASVIR_NR_THREADS_LOCAL; tid++) {
+        if (ttld.ndata->tdata[tid].state == TASVIR_THREAD_STATE_RUNNING) {
+            ttld.ndata->tdata[tid].do_sync = false;
+
+            /* quick check to see if thread is alive */
+            /* FIXME: ttld.ndata->time_us - ttld.ndata->tdata[tid].update_us > ttld.node->heartbeat_us */
+            if (kill(ttld.node->threads[tid].tid.pid, 0) == -1 && errno == ESRCH) {
+                tasvir_kill_thread(&ttld.node->threads[tid]);
+                continue;
+            }
+
+            /* FIXME: add crash timeout */
+            while (ttld.ndata->tdata[tid].in_sync) {
+                rte_delay_us_block(1);
+            }
+            nr_threads++;
         }
-        */
     }
-    atomic_store(&ttls.nstate->barrier_entry, ttls.node ? ttls.node->nr_threads : 1);
-    atomic_store(&ttls.nstate->barrier_exit, ttls.node ? ttls.node->nr_threads : 1);
 
-    ttls.nstate->nr_jobs = 0;
-    atomic_store(&ttls.nstate->cur_job, 0);
-    tasvir_walk_areas(ttls.root_desc, &tasvir_schedule_sync);
+    atomic_store(&ttld.ndata->barrier_entry, nr_threads);
+    atomic_store(&ttld.ndata->barrier_exit, nr_threads);
 
-    for (size_t i = 0; i < TASVIR_NR_THREADS_LOCAL; i++) {
-        if (ttls.node->threads[i].status != TASVIR_THREAD_STATUS_RUNNING)
-            continue;
-        ttls.nstate->tstate[i].sync = true;
+    ttld.ndata->nr_jobs = 0;
+    tasvir_walk_areas(ttld.root_desc, &tasvir_schedule_sync);
+
+    for (size_t tid = 0; tid < TASVIR_NR_THREADS_LOCAL; tid++) {
+        if (ttld.ndata->tdata[tid].state == TASVIR_THREAD_STATE_RUNNING)
+            ttld.ndata->tdata[tid].do_sync = true;
     }
 }
 
@@ -1468,14 +1523,12 @@ static inline void tasvir_service_sync_rotate_logs(tasvir_area_desc *d) {
     if (!d->active)
         return;
 
-    int i;
-    const uint64_t MS = 1000;
-    uint64_t delta_us[3] = {500 * MS, 15000 * MS, 30000 * MS};
-    for (i = TASVIR_NR_AREA_LOGS - 2; i >= 0; i--) {
+    uint64_t delta_us[3] = {500 * MS2US, 15 * S2US, 30 * S2US};
+    for (int i = TASVIR_NR_AREA_LOGS - 2; i >= 0; i--) {
         tasvir_area_log *log = &d->h->diff_log[i];
         tasvir_area_log *log_next = &d->h->diff_log[i + 1];
 
-        if (log->ts_last_us - log->ts_first_us > delta_us[i]) {
+        if (log->end_us - log->start_us > delta_us[i]) {
             tasvir_log_t *ptr = log->data;
             tasvir_log_t *ptr_next = log_next->data;
             tasvir_log_t *ptr_last = log_next->data;
@@ -1484,48 +1537,48 @@ static inline void tasvir_service_sync_rotate_logs(tasvir_area_desc *d) {
                 *ptr = 0;
             }
             log->version_start = log_next->version_end = log->version_end;
-            log->ts_first_us = log_next->ts_last_us = log->ts_last_us;
+            log->start_us = log_next->end_us = log->end_us;
         }
     }
 }
 
-static inline void tasvir_msg_mem_generate(void *addr, size_t len, bool is_owner) {
+static inline void tasvir_msg_mem_generate(void *addr, size_t len, bool is_rw) {
     const int batch_size = 16;
-    tasvir_msg_mem *msg[batch_size];
+    tasvir_msg_mem *msg[TASVIR_RING_SIZE];
     tasvir_msg_mem *m;
     size_t i = 0;
 
-    if (rte_mempool_get_bulk(ttls.nstate->mp, (void **)msg, batch_size)) {
-        TASVIR_LOG("rte_mempool_get_bulk failed\n");
+    if (rte_mempool_get_bulk(ttld.ndata->mp, (void **)msg, batch_size)) {
+        LOG_DBG("rte_mempool_get_bulk failed");
         // TODO: flush egress and retry
         abort();
     }
 
     while (len > 0) {
         m = msg[i];
-        m->h.src_tid = ttls.thread->tid;
-        m->h.dst_tid = ttls.nstate->update_tid;
-        m->h.id = ttls.nr_msgs++;
+        m->h.src_tid = ttld.thread->tid;
+        m->h.dst_tid = ttld.ndata->update_tid;
+        m->h.id = ttld.nr_msgs++;
         m->h.type = TASVIR_MSG_TYPE_MEM;
-        m->h.time_us = ttls.nstate->time_us;
+        m->h.time_us = ttld.ndata->time_us;
         m->addr = addr;
-        m->len = TASVIR_MIN(TASVIR_CACHELINE_BYTES * TASVIR_NR_CACHELINES_PER_MSG, len);
+        m->len = MIN(TASVIR_CACHELINE_BYTES * TASVIR_NR_CACHELINES_PER_MSG, len);
         m->h.mbuf.pkt_len = m->h.mbuf.data_len = m->len + offsetof(tasvir_msg_mem, line) - offsetof(tasvir_msg, eh);
-        tasvir_mov32blocks_stream(m->line, is_owner ? tasvir_data2shadow(addr) : addr, m->len);
+        tasvir_mov32blocks_stream(m->line, is_rw ? tasvir_data2shadow(addr) : addr, m->len);
 
         addr = (uint8_t *)addr + m->len;
         len -= m->len;
 
         if (++i >= batch_size) {
             i = 0;
-            if (rte_ring_sp_enqueue_bulk(ttls.nstate->ring_ext_tx, (void **)msg, batch_size, NULL) != batch_size) {
-                TASVIR_LOG("rte_ring_sp_enqueue_bulk failed\n");
+            if (rte_ring_sp_enqueue_bulk(ttld.ndata->ring_ext_tx, (void **)msg, batch_size, NULL) != batch_size) {
+                LOG_DBG("rte_ring_sp_enqueue_bulk failed");
                 // TODO: flush egress and retry
                 abort();
             }
             tasvir_service_port();
-            if (rte_mempool_get_bulk(ttls.nstate->mp, (void **)msg, batch_size)) {
-                TASVIR_LOG("rte_mempool_get_bulk failed\n");
+            if (rte_mempool_get_bulk(ttld.ndata->mp, (void **)msg, batch_size)) {
+                LOG_DBG("rte_mempool_get_bulk failed");
                 // TODO: flush egress and retry
                 abort();
             }
@@ -1534,35 +1587,34 @@ static inline void tasvir_msg_mem_generate(void *addr, size_t len, bool is_owner
 
     size_t count = 0;
     if (i > 0) {
-        count = rte_ring_sp_enqueue_bulk(ttls.nstate->ring_ext_tx, (void **)msg, i, NULL);
+        count = rte_ring_sp_enqueue_bulk(ttld.ndata->ring_ext_tx, (void **)msg, i, NULL);
         if (count != i) {
-            TASVIR_LOG("rte_ring_sp_enqueue_bulk failed\n");
+            LOG_DBG("rte_ring_sp_enqueue_bulk failed");
             // TODO: flush egress and retry
             abort();
         }
         tasvir_service_port();
-        rte_mempool_put_bulk(ttls.nstate->mp, (void **)&msg[i], batch_size - i);
+        rte_mempool_put_bulk(ttld.ndata->mp, (void **)&msg[i], batch_size - i);
     }
 }
 
 static inline size_t tasvir_sync_area_external_boot(tasvir_area_desc *d, bool boot) {
-    if (!d || !d->owner || !tasvir_is_thread_local(d->owner) || d->h->diff_log[0].version_end == 0) {
+    if (!d || !d->owner || !tasvir_is_thread_local(d->owner) || d->h->diff_log[0].version_end == 0)
         return 0;
-    }
 
     int i;
-    bool is_owner = tasvir_is_owner(d);
+    bool is_rw = tasvir_is_mapped_rw(d);
 
-    if (!d->pd && ttls.is_root)
+    if (!d->pd && ttld.is_root)
         tasvir_msg_mem_generate(d, TASVIR_ALIGNX(sizeof(tasvir_area_desc), TASVIR_CACHELINE_BYTES), true);
 
     size_t nbits0 = 0;
     size_t nbits1 = 0;
     size_t nbits1_seen = 0;
     size_t nbits_seen = 0;
-    size_t nbits_total = tasvir_size_loggable(d) >> TASVIR_SHIFT_BIT;
+    size_t nbits_total = d->offset_log_end >> TASVIR_SHIFT_BIT;
     uint8_t nbits_same;
-    uint8_t nbits_unit_left = TASVIR_MIN(TASVIR_LOG_UNIT_BITS, nbits_total);
+    uint8_t nbits_unit_left = MIN(TASVIR_LOG_UNIT_BITS, nbits_total);
 
     uint8_t *src = (uint8_t *)d->h;
     int pivot = 0;
@@ -1570,13 +1622,13 @@ static inline size_t tasvir_sync_area_external_boot(tasvir_area_desc *d, bool bo
     tasvir_log_t log_val = 0;
 
     // FIXME: latter is a heuristic for boot time
-    bool force = boot || ttls.nstate->time_us - ttls.node_desc->boot_us < 5000 * 1000;
+    bool force = boot || ttld.ndata->time_us - ttld.node_desc->boot_us < 5000 * 1000;
 
     for (pivot = 0; pivot < TASVIR_NR_AREA_LOGS; pivot++) {
-        if (!force && ttls.nstate->time_us - d->h->diff_log[pivot].ts_last_us > TASVIR_SYNC_EXTERNAL_US) {
+        if (!force && ttld.ndata->time_us - d->h->diff_log[pivot].end_us > TASVIR_SYNC_EXTERNAL_US) {
             break;
         }
-        log[pivot] = is_owner ? d->h->diff_log[pivot].data : tasvir_data2shadow(d->h->diff_log[pivot].data);
+        log[pivot] = is_rw ? d->h->diff_log[pivot].data : tasvir_data2shadow(d->h->diff_log[pivot].data);
         log_val |= *log[pivot];
     }
 
@@ -1586,7 +1638,7 @@ static inline size_t tasvir_sync_area_external_boot(tasvir_area_desc *d, bool bo
     while (nbits_total > nbits_seen) {
         nbits_same = _lzcnt_u64(log_val);
         if (nbits_same > 0) {
-            nbits_same = TASVIR_MIN(nbits_unit_left, nbits_same);
+            nbits_same = MIN(nbits_unit_left, nbits_same);
             nbits_seen += nbits_same;
             nbits0 += nbits_same;
             nbits_unit_left -= nbits_same;
@@ -1597,13 +1649,13 @@ static inline size_t tasvir_sync_area_external_boot(tasvir_area_desc *d, bool bo
             if (nbits0 > 0) {
                 size_t tmp = (nbits0 + nbits1) << TASVIR_SHIFT_BIT;
                 /* copy over for a previous batch of 1s */
-                tasvir_msg_mem_generate(src, nbits1 << TASVIR_SHIFT_BIT, is_owner);
+                tasvir_msg_mem_generate(src, nbits1 << TASVIR_SHIFT_BIT, is_rw);
                 src += tmp;
                 nbits0 = nbits1 = 0;
             }
 
             nbits_same = _lzcnt_u64(~log_val);
-            nbits_same = TASVIR_MIN(nbits_unit_left, nbits_same);
+            nbits_same = MIN(nbits_unit_left, nbits_same);
             nbits_seen += nbits_same;
             nbits1 += nbits_same;
             nbits1_seen += nbits_same;
@@ -1612,7 +1664,7 @@ static inline size_t tasvir_sync_area_external_boot(tasvir_area_desc *d, bool bo
         }
 
         if (nbits_unit_left == 0) {
-            nbits_unit_left = TASVIR_MIN(TASVIR_LOG_UNIT_BITS, nbits_total - nbits_seen);
+            nbits_unit_left = MIN(TASVIR_LOG_UNIT_BITS, nbits_total - nbits_seen);
             log_val = 0;
             for (i = 0; i < pivot; i++) {
                 log[i]++;
@@ -1621,109 +1673,103 @@ static inline size_t tasvir_sync_area_external_boot(tasvir_area_desc *d, bool bo
         }
     }
 
-    if (nbits1 > 0) {
-        tasvir_msg_mem_generate(src, nbits1 << TASVIR_SHIFT_BIT, is_owner);
-    }
+    if (nbits1 > 0)
+        tasvir_msg_mem_generate(src, nbits1 << TASVIR_SHIFT_BIT, is_rw);
 
     return nbits1_seen << TASVIR_SHIFT_BIT;
 }
 
-static inline size_t tasvir_sync_area_external(tasvir_area_desc *d) { return tasvir_sync_area_external_boot(d, false); }
+static inline void tasvir_sync_area_external(tasvir_area_desc *d) { tasvir_sync_area_external_boot(d, false); }
 
 static inline void tasvir_sync_external() {
-    ttls.nstate->last_sync_ext_start = ttls.nstate->time_us;
+    ttld.ndata->last_sync_ext_start = ttld.ndata->time_us;
 
-    tasvir_walk_areas(ttls.root_desc, &tasvir_sync_area_external);
+    tasvir_walk_areas(ttld.root_desc, &tasvir_sync_area_external);
 
-    ttls.nstate->time_us = tasvir_gettime_us();
-    ttls.nstate->last_sync_ext_end = ttls.nstate->time_us;
+    ttld.ndata->time_us = tasvir_gettime_us();
+    ttld.ndata->last_sync_ext_end = ttld.ndata->time_us;
 }
 
 static inline int tasvir_service_sync() {
-    tasvir_local_tstate *tstate = &ttls.nstate->tstate[ttls.thread->tid.idx];
-    if (ttls.is_daemon)
-        ttls.nstate->last_sync_start = tstate->update_us;
+    ttld.tdata->in_sync = true;
+    ttld.tdata->do_sync = false;
+    if (ttld.is_daemon) {
+        ttld.ndata->last_sync_start = ttld.tdata->update_us;
+    }
 
     size_t cur_job;
-    uint64_t time_us = ttls.nstate->time_us;
-    size_t total_bytes = 0;
-
-    if (tasvir_barrier_wait(&ttls.nstate->barrier_entry, TASVIR_BARRIER_ENTER_US) != 0) {
-        tstate->sync = false;
-        return -1;
-    }
-
-    while ((cur_job = atomic_fetch_add(&ttls.nstate->cur_job, 1)) < ttls.nstate->nr_jobs) {
-        tasvir_sync_job_run(&ttls.nstate->jobs[cur_job]);
-        total_bytes += ttls.nstate->jobs[cur_job].bytes_changed;
-    }
-
-    /* special case for syncing root desc because it is an orphan */
-    if (ttls.is_daemon) {
-        /* FIXME: what if root is external? check address mapping when d owner is external */
-        /* FIXME: no internal log to capture root desc changes? */
-        total_bytes = tasvir_sync_job_helper_copy(
-            (uint8_t *)ttls.root_desc, NULL, TASVIR_ALIGN(sizeof(tasvir_area_desc)), tasvir_is_owner(ttls.root_desc));
-        ttls.nstate->sync_req = false;
-    }
+    uint64_t time_us = ttld.ndata->time_us;
 
     _mm_sfence();
 
-    if (tasvir_barrier_wait(&ttls.nstate->barrier_exit, TASVIR_HEARTBEAT_US) != 0) {
-        tstate->sync = false;
-        // FIXME TODO: a thread must have died. loop and diagnose
-        TASVIR_LOG("tasvir_barrier_wait exit failed\n");
+    if (!tasvir_barrier_wait(&ttld.ndata->barrier_entry, TASVIR_BARRIER_ENTER_US)) {
+        ttld.tdata->in_sync = false;
         return -1;
     }
 
-    tstate->update_us = tasvir_gettime_us();
-    tstate->sync = false;
-
-    if (ttls.is_daemon) {
-        for (cur_job = 0; cur_job < ttls.nstate->nr_jobs; cur_job++) {
-            ttls.nstate->sync_stats_cur.cumbytes += ttls.nstate->jobs[cur_job].bytes_changed;
-        }
-        ttls.nstate->time_us = tstate->update_us;
-        ttls.nstate->last_sync_end = tstate->update_us;
-        ttls.nstate->sync_stats_cur.count++;
-        ttls.nstate->sync_stats_cur.cumtime_us += tstate->update_us - time_us;
-
-        tasvir_walk_areas(ttls.root_desc, &tasvir_service_sync_rotate_logs);
+    /* special case for syncing root desc because it is an orphan */
+    if (ttld.is_daemon) {
+        /* FIXME: what if root is external? check address mapping when d owner is external */
+        /* FIXME: no internal log to capture root desc changes? */
+        tasvir_sync_job_run_helper((uint8_t *)ttld.root_desc, NULL, TASVIR_ALIGN(sizeof(tasvir_area_desc)),
+                                   tasvir_is_mapped_rw(ttld.root_desc));
+        ttld.ndata->sync_req = false;
     }
 
+    bool done;
+    do {
+        done = true;
+        for (cur_job = 0; cur_job < ttld.ndata->nr_jobs; cur_job++) {
+            /* reduce contention a bit */
+            size_t idx = (cur_job + ttld.thread->tid.idx) % ttld.ndata->nr_jobs;
+            done &= tasvir_sync_job_run(&ttld.ndata->jobs[idx]);
+        }
+    } while (!done);
+
+    _mm_sfence();
+
+    ttld.tdata->update_us = tasvir_gettime_us();
+
+    if (ttld.is_daemon) {
+        for (cur_job = 0; cur_job < ttld.ndata->nr_jobs; cur_job++) {
+            ttld.ndata->sync_stats_cur.cumbytes += ttld.ndata->jobs[cur_job].bytes_updated;
+        }
+        ttld.ndata->time_us = ttld.tdata->update_us;
+        ttld.ndata->last_sync_end = ttld.tdata->update_us;
+        ttld.ndata->sync_stats_cur.count++;
+        ttld.ndata->sync_stats_cur.cumtime_us += ttld.tdata->update_us - time_us;
+        tasvir_walk_areas(ttld.root_desc, &tasvir_service_sync_rotate_logs);
+    }
+
+    ttld.tdata->in_sync = false;
     return 0;
 }
 
-tasvir_sync_stats tasvir_sync_stats_get() { return ttls.nstate->sync_stats; }
+tasvir_sync_stats tasvir_sync_stats_get() { return ttld.ndata->sync_stats; }
 
 void tasvir_sync_stats_reset() {
-    memset(&ttls.nstate->sync_stats, 0, sizeof(tasvir_sync_stats));
-    memset(&ttls.nstate->sync_stats_cur, 0, sizeof(tasvir_sync_stats));
-}
-
-static inline void tasvir_print_area(tasvir_area_desc *d) {
-    TASVIR_LOG("name=%s owner=%p version=%lu update_us=%lu\n", d->name, (void *)d->owner, d->h ? d->h->version : 0,
-               d->h ? d->h->update_us : 0);
+    memset(&ttld.ndata->sync_stats, 0, sizeof(tasvir_sync_stats));
+    memset(&ttld.ndata->sync_stats_cur, 0, sizeof(tasvir_sync_stats));
 }
 
 static inline void tasvir_service_stats() {
     uint64_t MS = 1 * 1000;  // in us
     uint64_t S = MS * 1000;  // in us
-    uint64_t interval_us = ttls.nstate->time_us - ttls.nstate->last_stat;
-    ttls.nstate->last_stat = ttls.nstate->time_us;
+    uint64_t interval_us = ttld.ndata->time_us - ttld.ndata->last_stat;
+    ttld.ndata->last_stat = ttld.ndata->time_us;
 
-    tasvir_sync_stats *cur = &ttls.nstate->sync_stats_cur;
-    tasvir_sync_stats *avg = &ttls.nstate->sync_stats;
+    tasvir_sync_stats *cur = &ttld.ndata->sync_stats_cur;
+    tasvir_sync_stats *avg = &ttld.ndata->sync_stats;
 
     struct rte_eth_stats s;
     rte_eth_stats_get(0, &s);
 
-    TASVIR_LOG(
+    LOG_DBG(
         "sync=%lu/s sync_t=%.1f%%,%luus/sync change=%luKB/s,%luKB/sync "
         "\n\t\t\t\t"
         "rx=%luKB/s,%luKpps "
         "(ipkts=%lu ibytes=%lu ierr=%lu imiss=%lu inombuf=%lu"
-        ",opkts=%lu obytes=%lu oerr=%lu)\n",
+        ",opkts=%lu obytes=%lu oerr=%lu)",
         S * cur->count / interval_us, 100. * cur->cumtime_us / interval_us,
         cur->count > 0 ? cur->cumtime_us / cur->count : 0, MS * cur->cumbytes / interval_us,
         cur->count > 0 ? cur->cumbytes / 1000 / cur->count : 0, MS * cur->cumbytes_rx / interval_us,
@@ -1741,59 +1787,62 @@ static inline void tasvir_service_stats() {
     cur->cumbytes = 0;
     cur->cumbytes_rx = 0;
     cur->cumpkts_rx = 0;
-    // tasvir_walk_areas(ttls.root_desc, &tasvir_print_area);
+    // tasvir_walk_areas(ttld.root_desc, &tasvir_print_area);
 }
 
 static inline void tasvir_service_daemon() {
     /* update time */
-    ttls.nstate->time_us = tasvir_gettime_us();
-    ttls.nstate->tstate[TASVIR_THREAD_DAEMON_IDX].update_us = ttls.nstate->time_us;
+    ttld.ndata->time_us = tasvir_gettime_us();
+    ttld.ndata->tdata[TASVIR_THREAD_DAEMON_IDX].update_us = ttld.ndata->time_us;
 
     /* service rings */
-    if (ttls.node) {
-        for (size_t i = 0; i < TASVIR_NR_THREADS_LOCAL; i++)
-            if (ttls.node->threads[i].status == TASVIR_THREAD_STATUS_RUNNING ||
-                ttls.node->threads[i].status == TASVIR_THREAD_STATUS_BOOTING)
-                tasvir_service_ring(ttls.nstate->tstate[i].ring_tx);
+    if (ttld.node) {
+        for (size_t tid = 0; tid < TASVIR_NR_THREADS_LOCAL; tid++)
+            if (ttld.ndata->tdata[tid].state == TASVIR_THREAD_STATE_RUNNING ||
+                ttld.ndata->tdata[tid].state == TASVIR_THREAD_STATE_BOOTING)
+                tasvir_service_ring(ttld.ndata->tdata[tid].ring_tx);
     }
 
     /* service physical port */
     tasvir_service_port();
 
-    if (ttls.thread && ttls.thread->status == TASVIR_THREAD_STATUS_RUNNING) {
-        if (ttls.nstate->time_us - ttls.nstate->last_sync_ext_start < TASVIR_SYNC_EXTERNAL_US) {
+    if (ttld.tdata->state == TASVIR_THREAD_STATE_RUNNING) {
+        if (ttld.ndata->time_us - ttld.ndata->last_sync_ext_end >= TASVIR_SYNC_EXTERNAL_US) {
             /* tasvir_sync_external(); */
         }
 
-        if (ttls.nstate->sync_req || ttls.nstate->time_us - ttls.nstate->last_sync_start >= TASVIR_SYNC_INTERNAL_US) {
+        if (ttld.ndata->sync_req || ttld.ndata->time_us - ttld.ndata->last_sync_end >= TASVIR_SYNC_INTERNAL_US) {
             tasvir_service_sync_prepare();
         }
 
-        if (ttls.nstate->time_us - ttls.nstate->last_stat >= TASVIR_STAT_US) {
+        if (ttld.ndata->time_us - ttld.ndata->last_stat >= TASVIR_STAT_US) {
             tasvir_service_stats();
         }
     }
 }
 
 bool tasvir_service() {
-    if (ttls.is_daemon)
+    if (ttld.is_daemon)
         tasvir_service_daemon();
-    else if (ttls.thread) {
-        ttls.nstate->tstate[ttls.thread->tid.idx].update_us = ttls.nstate->time_us;
-        tasvir_service_ring(ttls.nstate->tstate[ttls.thread->tid.idx].ring_rx);
+    else if (ttld.thread) {
+        ttld.ndata->tdata[ttld.thread->tid.idx].update_us = ttld.ndata->time_us;
+        tasvir_service_ring(ttld.ndata->tdata[ttld.thread->tid.idx].ring_rx);
     } else
-        tasvir_service_ring(ttls.nstate->tstate[TASVIR_THREAD_DAEMON_IDX].ring_rx);
+        tasvir_service_ring(ttld.ndata->tdata[TASVIR_THREAD_DAEMON_IDX].ring_rx);
 
-    if (ttls.thread && ttls.nstate->tstate[ttls.thread->tid.idx].sync) {
+    if (ttld.thread && ttld.tdata->do_sync) {
         return tasvir_service_sync() == 0;
     }
 
     return false;
 }
 
-void tasvir_service_block() {
-    while (!tasvir_service()) {
+bool tasvir_service_wait(uint64_t timeout_us) {
+    bool retval = false;
+    uint64_t end_time_us = tasvir_gettime_us() + timeout_us;
+    while (tasvir_gettime_us() < end_time_us && !(retval = tasvir_service())) {
         rte_delay_us_block(1);
-        ttls.nstate->sync_req = true;
+        ttld.ndata->sync_req = true;
     }
+    return retval;
 }

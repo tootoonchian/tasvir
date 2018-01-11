@@ -1,11 +1,11 @@
 #include <assert.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
-#include <unistd.h>
 #include <time.h>
-#include <pthread.h>
+#include <unistd.h>
 #include "alloc.h"
 #include "alloc_dict.h"
 #include "tasvir.h"
@@ -38,6 +38,8 @@ void test_allocator() {
 }
 #endif
 #define MAX_CORES 4
+#define MAX_SERVERS 4
+
 struct kv_test {
     int id;
     int servers;
@@ -47,10 +49,7 @@ struct kv_test {
     int ncores;
 };
 
-enum kvop {
-    GET,
-    UPDATE
-};
+enum kvop { GET, UPDATE };
 
 struct operation {
     int server;
@@ -67,7 +66,7 @@ static inline void wrap_service() {
 #endif
 }
 
-static void parse_cores(char* core_string, struct kv_test *out) {
+static void parse_cores(char *core_string, struct kv_test *out) {
     char *next = strtok(core_string, ",");
     out->ncores = 0;
     do {
@@ -75,29 +74,29 @@ static void parse_cores(char* core_string, struct kv_test *out) {
     } while (out->ncores < MAX_CORES && (next = strtok(NULL, ",")) != NULL);
 }
 
-int parse_args(int argc, char* argv[], struct kv_test *out) {
+int parse_args(int argc, char *argv[], struct kv_test *out) {
     int c;
-    while((c = getopt(argc, argv, "s:n:a:l:c:")) != -1) {
+    while ((c = getopt(argc, argv, "s:n:a:l:c:")) != -1) {
         switch (c) {
-            case 's':
-                out->id = atoi(optarg);
-                /*printf("Server ID is %d\n", server_id);*/
-                break;
-            case 'n':
-                out->servers = atoi(optarg);
-                /*printf("Num regions is %d\n", nservers);*/
-                break;
-            case 'a':
-                out->access_log = optarg;
-                /*printf("Access log is at %s\n", access_log);*/
-                break;
-            case 'l':
-                out->load_log = optarg;
-                break;
-                /*printf("Load log is at %s\n", load_log);*/
-            case 'c':
-                parse_cores(optarg, out);
-                break;
+        case 's':
+            out->id = atoi(optarg);
+            /*printf("Server ID is %d\n", server_id);*/
+            break;
+        case 'n':
+            out->servers = atoi(optarg);
+            /*printf("Num regions is %d\n", nservers);*/
+            break;
+        case 'a':
+            out->access_log = optarg;
+            /*printf("Access log is at %s\n", access_log);*/
+            break;
+        case 'l':
+            out->load_log = optarg;
+            break;
+        /*printf("Load log is at %s\n", load_log);*/
+        case 'c':
+            parse_cores(optarg, out);
+            break;
         }
     }
     return 1;
@@ -140,8 +139,8 @@ inline void update(dictWrapper *w, char *key, char *value) {
 inline void get(dictWrapper *w, char *key) {
     dictEntry *de;
     int len = strlen(key);
-    if(key[len-1] == '\n') {
-        key[len-1] = 0;
+    if (key[len - 1] == '\n') {
+        key[len - 1] = 0;
     }
     de = dictFind(w->d, key);
 #if CONSISTENCY
@@ -233,7 +232,7 @@ void run_access(int id, struct operation *acs, dictWrapper *w[], __unused size_t
 }
 
 // KEY SIZE is 64
-const  size_t KEY_SIZE = 64;
+const size_t KEY_SIZE = 64;
 // VALUE SIZE is 256
 const size_t VALUE_SIZE = 256;
 
@@ -251,20 +250,7 @@ struct thread_init {
     struct operation *access_log;
 };
 
-inline void cpu_relax() {
-    __asm__ __volatile__ ("rep; nop" : : : "memory");
-}
-
-
-#define MAX_SERVERS 4
-inline tasvir_area_desc *subscribe_region(char* area_name, tasvir_area_desc *root) {
-    tasvir_area_desc *remote;
-    while (!(remote = tasvir_attach(root, area_name, NULL))) {
-        tasvir_service(); // Not wrapped since there is no way around this.
-        cpu_relax();
-    }
-    return remote;
-}
+inline void cpu_relax() { __asm__ __volatile__("rep; nop" : : : "memory"); }
 
 static inline void await_barrier(uint64_t *var, const uint64_t val) {
     while (*var != val) {
@@ -273,8 +259,7 @@ static inline void await_barrier(uint64_t *var, const uint64_t val) {
     }
 }
 
-inline void timespec_diff(struct timespec *start, struct timespec *stop,
-                   struct timespec *result) {
+inline void timespec_diff(struct timespec *start, struct timespec *stop, struct timespec *result) {
     if ((stop->tv_nsec - start->tv_nsec) < 0) {
         result->tv_sec = stop->tv_sec - start->tv_sec - 1;
         result->tv_nsec = stop->tv_nsec - start->tv_nsec + 1000000000;
@@ -287,11 +272,11 @@ inline void timespec_diff(struct timespec *start, struct timespec *stop,
 }
 
 static void *thread_code(void *init_struct) {
-    struct thread_init *args = (struct thread_init*)init_struct;
+    struct thread_init *args = (struct thread_init *)init_struct;
     tasvir_area_desc param;
     tasvir_area_desc param_lock;
     tasvir_area_desc *d[MAX_SERVERS] = {NULL};
-    tasvir_area_desc *l[MAX_SERVERS] = {NULL}; // Used for barrier
+    tasvir_area_desc *l[MAX_SERVERS] = {NULL};  // Used for barrier
     tasvir_area_desc *root_desc = NULL;
     char area_name[32];
     uint8_t *data = NULL;
@@ -305,7 +290,7 @@ static void *thread_code(void *init_struct) {
     dictWrapper *w[MAX_SERVERS] = {NULL};
     uint64_t *locks[MAX_SERVERS] = {NULL};
     int i = 0;
-#if 0 // CLANG does not like pthread_set_affinity_np
+#if 0  // CLANG does not like pthread_set_affinity_np
     cpu_set_t cpuset;
     pthread_t thread = pthread_self();
     int ret = 0;
@@ -331,15 +316,15 @@ static void *thread_code(void *init_struct) {
     // Naming based on ID, not sure if this is reasonable.
     snprintf(area_name, 32, "kvs%d", args->id);
     strcpy(param.name, area_name);
-    d[args->id] = tasvir_new(param); // Created a region.
+    d[args->id] = tasvir_new(param);  // Created a region.
     assert(d[args->id]);
     data = tasvir_data(d[args->id]);
     dict = data;
     entry = (void *)(data + REGION_SIZE);
-    key = (void *)(data +  2ull * REGION_SIZE);
+    key = (void *)(data + 2ull * REGION_SIZE);
     val = (void *)(data + 3ull * REGION_SIZE);
-    w[args->id] = initDictWrapper(dict, REGION_SIZE, entry, REGION_SIZE, key, KEY_SIZE, REGION_SIZE,
-                val, VALUE_SIZE, REGION_SIZE);
+    w[args->id] = initDictWrapper(dict, REGION_SIZE, entry, REGION_SIZE, key, KEY_SIZE, REGION_SIZE, val, VALUE_SIZE,
+                                  REGION_SIZE);
     printf("Created dictionary\n");
     // Get locks
     snprintf(area_name, 32, "lck%d", args->id);
@@ -360,17 +345,17 @@ static void *thread_code(void *init_struct) {
 
     for (i = 0; i < args->servers; i++) {
         if (i == args->id) {
-            continue; // We already know each other.
+            continue;  // We already know each other.
         }
         snprintf(area_name, 32, "kvs%d", i);
-        d[i] = subscribe_region(area_name, root_desc);
+        d[i] = tasvir_attach_wait(root_desc, area_name, NULL, false, 5 * 1000 * 1000);
         tasvir_service();
-        w[i] = subscribeDict(tasvir_data(d[i])); // Data is on top.
+        w[i] = subscribeDict(tasvir_data(d[i]));  // Data is on top.
         printf("Successfully subscribed to dictionary region for %d\n", i);
         tasvir_service();
 
         snprintf(area_name, 32, "lck%d", i);
-        l[i] = subscribe_region(area_name, root_desc);
+        l[i] = tasvir_attach_wait(root_desc, area_name, NULL, false, 5 * 1000 * 1000);
         locks[i] = (uint64_t *)l[i];
         printf("Successfully subscribed to lock for %d\n", i);
         tasvir_service();
@@ -391,15 +376,13 @@ static void *thread_code(void *init_struct) {
     run_access(args->id, args->access_log, w, args->servers);
     clock_gettime(CLOCK_MONOTONIC, &end);
     timespec_diff(&start, &end, &diff);
-    printf("%d Done running operations took %lu sec %lu ns\n",
-            args->id, diff.tv_sec, diff.tv_nsec);
+    printf("%d Done running operations took %lu sec %lu ns\n", args->id, diff.tv_sec, diff.tv_nsec);
     return NULL;
 }
 
 int main(int argc, char *argv[]) {
-
     struct kv_test args;
-    /*int i = 0;*/
+/*int i = 0;*/
 #if 0
     pthread_t thread[MAX_CORES];
 #endif

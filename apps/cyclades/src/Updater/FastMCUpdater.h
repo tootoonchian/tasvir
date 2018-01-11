@@ -31,7 +31,7 @@ protected:
         const auto &movie_coordinate = c[1];
         double coeff = 0;
         for (int i = 0; i < model->NumCoordinates(); i++) {
-            coeff += model->Data2D(user_coordinate, i, false) * model->Data2D(movie_coordinate, i, false);
+            coeff += model->Data(user_coordinate, i, false) * model->Data(movie_coordinate, i, false);
         }
         coeff -= labels[0];
         gradient.coeffs[0] = coeff;
@@ -46,15 +46,15 @@ protected:
         const auto &movie_coordinate = c[1];
         const auto &n_coords = model->NumCoordinates();
 
-        tasvir_log_write(&model->Data2D(user_coordinate, 0, false), sizeof(double) * n_coords);
-        tasvir_log_write(&model->Data2D(movie_coordinate, 0, false), sizeof(double) * n_coords);
+        tasvir_log_write(&model->Data(user_coordinate, 0, false), sizeof(double) * n_coords);
+        tasvir_log_write(&model->Data(movie_coordinate, 0, false), sizeof(double) * n_coords);
         for (int i = 0; i < n_coords; i++) {
-            double new_user_value = model->Data2D(user_coordinate, i, false) -
-                                    FLAGS_learning_rate * g_coeff * model->Data2D(movie_coordinate, i, false);
-            double new_movie_value = model->Data2D(movie_coordinate, i, false) -
-                                     FLAGS_learning_rate * g_coeff * model->Data2D(user_coordinate, i, false);
-            model->Data2D(user_coordinate, i, false) = new_user_value;
-            model->Data2D(movie_coordinate, i, false) = new_movie_value;
+            double new_user_value = model->Data(user_coordinate, i, false) -
+                                    FLAGS_learning_rate * g_coeff * model->Data(movie_coordinate, i, false);
+            double new_movie_value = model->Data(movie_coordinate, i, false) -
+                                     FLAGS_learning_rate * g_coeff * model->Data(user_coordinate, i, false);
+            model->Data(user_coordinate, i, false) = new_user_value;
+            model->Data(movie_coordinate, i, false) = new_movie_value;
         }
     }
 

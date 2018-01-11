@@ -1,5 +1,6 @@
 #ifndef _TASVIR__H_
 #define _TASVIR__H_
+#pragma once
 
 #include <limits.h>
 #include <math.h>
@@ -18,15 +19,18 @@
 
 #ifdef __cplusplus
 extern "C" {
+#define TASVIR_STATIC_ASSERT static_assert
+#else
+#define TASVIR_STATIC_ASSERT _Static_assert
 #endif
 
 typedef uint64_t tasvir_log_t;
 typedef unsigned long tasvir_arg_promo_t;
 
+#define TASVIR_BARRIER_ENTER_US (200)             /* max time to enter sync */
+#define TASVIR_STAT_US (1 * 1000 * 1000)          /* stat interval */
 #define TASVIR_SYNC_INTERNAL_US (100 * 1000)      /* sync interval */
 #define TASVIR_SYNC_EXTERNAL_US (1 * 1000 * 1000) /* sync interval */
-#define TASVIR_STAT_US (1 * 1000 * 1000)          /* stat interval */
-#define TASVIR_BARRIER_ENTER_US (10)              /* max time to enter sync */
 #define TASVIR_HEARTBEAT_US (1 * 1000 * 1000)     /* timer to announce a thread dead */
 
 #define TASVIR_ETH_PROTO (0x88b6)
@@ -48,17 +52,21 @@ typedef unsigned long tasvir_arg_promo_t;
 #define TASVIR_THREAD_DAEMON_IDX (0)
 
 #define __TASVIR_LOG2(x) (31 - __builtin_clz(x | 1))
+
 #define TASVIR_CACHELINE_BYTES (64)
 #define TASVIR_LOG_UNIT_BITS (CHAR_BIT * sizeof(tasvir_log_t))
-#define TASVIR_SHIFT_BIT (6) /* 1 bit per cacheline */
+#define TASVIR_SHIFT_BIT (__TASVIR_LOG2(TASVIR_CACHELINE_BYTES)) /* 1 bit per cacheline */
 #define TASVIR_SHIFT_BYTE (TASVIR_SHIFT_BIT + __TASVIR_LOG2(CHAR_BIT))
 #define TASVIR_SHIFT_UNIT (TASVIR_SHIFT_BYTE + __TASVIR_LOG2(sizeof(tasvir_log_t)))
+
 #define TASVIR_ALIGNMENT (uintptr_t)(1 << TASVIR_SHIFT_UNIT)
 #define TASVIR_ALIGNX(x, a) (((uintptr_t)(x) + a - 1) & ~(a - 1))
 #define TASVIR_ALIGN(x) TASVIR_ALIGNX(x, TASVIR_ALIGNMENT)
+
 #define TASVIR_SIZE_DATA ((size_t)TASVIR_ALIGN((4UL << 40))) /* must be a power of two; 4TB */
 #define TASVIR_SIZE_LOG ((size_t)TASVIR_ALIGN((TASVIR_SIZE_DATA >> TASVIR_SHIFT_BYTE)))
 #define TASVIR_SIZE_LOCAL ((size_t)TASVIR_ALIGN((TASVIR_HUGEPAGE_SIZE * 260)))
+
 #define TASVIR_ADDR_BASE ((uintptr_t)(0x0000100000000000UL))
 #define TASVIR_ADDR_DATA ((uintptr_t)(TASVIR_ADDR_BASE))
 #define TASVIR_ADDR_SHADOW ((uintptr_t)(TASVIR_ADDR_DATA + TASVIR_SIZE_DATA))
@@ -68,17 +76,22 @@ typedef unsigned long tasvir_arg_promo_t;
 #define TASVIR_ADDR_ROOT_DESC ((uintptr_t)(TASVIR_ADDR_SHADOW - TASVIR_HUGEPAGE_SIZE))
 #define TASVIR_ADDR_DPDK_BASE ((uintptr_t)(TASVIR_ADDR_END + TASVIR_HUGEPAGE_SIZE))
 
-_Static_assert(TASVIR_SIZE_DATA, "TASVIR_SIZE_DATA not a compile-time const expression.");
-_Static_assert(TASVIR_SIZE_LOG, "TASVIR_SIZE_LOG not a compile-time const expression.");
-_Static_assert(TASVIR_SIZE_LOCAL, "TASVIR_SIZE_LOCAL not a compile-time const expression.");
-_Static_assert(TASVIR_ADDR_BASE, "TASVIR_ADDR_BASE not a compile-time const expression.");
-_Static_assert(TASVIR_ADDR_DATA, "TASVIR_ADDR_DATA not a compile-time const expression.");
-_Static_assert(TASVIR_ADDR_SHADOW, "TASVIR_ADDR_SHADOW not a compile-time const expression.");
-_Static_assert(TASVIR_ADDR_LOG, "TASVIR_ADDR_LOG not a compile-time const expression.");
-_Static_assert(TASVIR_ADDR_LOCAL, "TASVIR_ADDR_LOCAL not a compile-time const expression.");
-_Static_assert(TASVIR_ADDR_END, "TASVIR_ADDR_END not a compile-time const expression.");
-_Static_assert(TASVIR_ADDR_ROOT_DESC, "TASVIR_ADDR_ROOT_DESC not a compile-time const expression.");
-_Static_assert(TASVIR_ADDR_DPDK_BASE, "TASVIR_ADDR_DPDK_BASE not a compile-time const expression.");
+TASVIR_STATIC_ASSERT(TASVIR_CACHELINE_BYTES, "TASVIR_CACHELINE_BYTES not a compile-time const expression.");
+TASVIR_STATIC_ASSERT(TASVIR_LOG_UNIT_BITS, "TASVIR_LOG_UNIT_BITS not a compile-time const expression.");
+TASVIR_STATIC_ASSERT(TASVIR_SHIFT_BIT, "TASVIR_SHIFT_BIT not a compile-time const expression.");
+TASVIR_STATIC_ASSERT(TASVIR_SHIFT_BYTE, "TASVIR_SHIFT_BYTE not a compile-time const expression.");
+TASVIR_STATIC_ASSERT(TASVIR_SHIFT_UNIT, "TASVIR_SHIFT_UNIT not a compile-time const expression.");
+TASVIR_STATIC_ASSERT(TASVIR_SIZE_DATA, "TASVIR_SIZE_DATA not a compile-time const expression.");
+TASVIR_STATIC_ASSERT(TASVIR_SIZE_LOG, "TASVIR_SIZE_LOG not a compile-time const expression.");
+TASVIR_STATIC_ASSERT(TASVIR_SIZE_LOCAL, "TASVIR_SIZE_LOCAL not a compile-time const expression.");
+TASVIR_STATIC_ASSERT(TASVIR_ADDR_BASE, "TASVIR_ADDR_BASE not a compile-time const expression.");
+TASVIR_STATIC_ASSERT(TASVIR_ADDR_DATA, "TASVIR_ADDR_DATA not a compile-time const expression.");
+TASVIR_STATIC_ASSERT(TASVIR_ADDR_SHADOW, "TASVIR_ADDR_SHADOW not a compile-time const expression.");
+TASVIR_STATIC_ASSERT(TASVIR_ADDR_LOG, "TASVIR_ADDR_LOG not a compile-time const expression.");
+TASVIR_STATIC_ASSERT(TASVIR_ADDR_LOCAL, "TASVIR_ADDR_LOCAL not a compile-time const expression.");
+TASVIR_STATIC_ASSERT(TASVIR_ADDR_END, "TASVIR_ADDR_END not a compile-time const expression.");
+TASVIR_STATIC_ASSERT(TASVIR_ADDR_ROOT_DESC, "TASVIR_ADDR_ROOT_DESC not a compile-time const expression.");
+TASVIR_STATIC_ASSERT(TASVIR_ADDR_DPDK_BASE, "TASVIR_ADDR_DPDK_BASE not a compile-time const expression.");
 
 struct rte_ring;
 struct rte_mempool;
@@ -99,8 +112,6 @@ typedef struct tasvir_area_desc tasvir_area_desc;
 typedef struct tasvir_area_log tasvir_area_log;
 typedef struct tasvir_area_user tasvir_area_user;
 typedef struct tasvir_area_header tasvir_area_header;
-typedef tasvir_area_desc *tasvir_area_container;
-typedef struct tasvir_sync_job tasvir_sync_job;
 typedef struct tasvir_sync_stats tasvir_sync_stats;
 typedef struct tasvir_node tasvir_node;
 typedef void (*tasvir_fnptr)(void *, ptrdiff_t *);
@@ -141,15 +152,6 @@ typedef enum {
 } tasvir_thread_type;
 
 static const char *tasvir_thread_type_str[] = {"invalid", "root", "daemon", "application"};
-
-typedef enum {
-    TASVIR_THREAD_STATUS_INVALID = 0,
-    TASVIR_THREAD_STATUS_DEAD,
-    TASVIR_THREAD_STATUS_BOOTING,
-    TASVIR_THREAD_STATUS_RUNNING
-} tasvir_thread_status;
-
-static const char *tasvir_thread_status_str[] = {"invalid", "dead", "booting", "running"};
 
 typedef enum {
     TASVIR_TID_INVALID = 0,
@@ -210,7 +212,7 @@ struct tasvir_msg_mem {
     void *addr;
     size_t len;
     tasvir_cacheline line[TASVIR_NR_CACHELINES_PER_MSG];
-};
+} __attribute__((__packed__));
 
 struct tasvir_rpc_status {
     bool do_free;
@@ -224,13 +226,14 @@ struct tasvir_thread {
     tasvir_tid tid;
     uint16_t core;
     tasvir_thread_type type;
-    tasvir_thread_status status;
+    bool active;
 };
 
 struct tasvir_area_desc {
     tasvir_area_desc *pd;
     tasvir_area_header *h;
     size_t len;
+    size_t offset_log_end;
     size_t nr_areas_max;
     tasvir_thread *owner;
     union {
@@ -240,40 +243,36 @@ struct tasvir_area_desc {
     uint64_t boot_us;
     uint64_t stale_us;
     uint8_t type;
-    bool immediate;
     bool active;
 };
 
 struct tasvir_area_log {
     uint64_t version_start;
+    uint64_t start_us;
     uint64_t version_end;
-    uint64_t ts_first_us;
-    uint64_t ts_last_us;
+    uint64_t end_us;
     tasvir_log_t *data;
 };
 
 struct tasvir_area_user {
     tasvir_node *node;
     uint64_t version;
+    bool active;
 };
 
 struct tasvir_area_header {
-    tasvir_area_desc *d;
+    struct {
+        bool rw; /* used to id the writer version */
+        bool local;
+    } private_tag; /* not to ever be synced */
+    tasvir_area_desc *d __attribute__((aligned(1 << TASVIR_SHIFT_BIT)));
     uint64_t version;
     uint64_t update_us;
     size_t nr_areas;
     size_t nr_users;
     bool active;
-    tasvir_area_user users[TASVIR_NR_NODES_AREA];
     tasvir_area_log diff_log[TASVIR_NR_AREA_LOGS];
-} __attribute__((aligned(TASVIR_CACHELINE_BYTES)));
-
-struct tasvir_sync_job {
-    tasvir_area_desc *d;
-    size_t offset;
-    size_t len;
-    uint64_t old_version;
-    size_t bytes_changed;
+    tasvir_area_user users[TASVIR_NR_NODES_AREA];
 } __attribute__((aligned(TASVIR_CACHELINE_BYTES)));
 
 struct tasvir_sync_stats {
@@ -287,7 +286,6 @@ struct tasvir_sync_stats {
 struct tasvir_node {
     tasvir_nid nid;
     uint32_t heartbeat_us;
-    size_t nr_threads;
     tasvir_thread threads[TASVIR_NR_THREADS_LOCAL];
 };
 
@@ -295,38 +293,42 @@ tasvir_area_desc *tasvir_init(uint8_t type, uint16_t core, char *pciaddr);
 tasvir_sync_stats tasvir_sync_stats_get(void);
 void tasvir_sync_stats_reset(void);
 /* FIXME: rpc assumes return value is a ptr */
-tasvir_rpc_status *tasvir_rpc_async(tasvir_area_desc *, tasvir_fnptr, ...);
-void *tasvir_rpc_sync(tasvir_area_desc *, uint64_t timeout, tasvir_fnptr, ...);
+tasvir_rpc_status *tasvir_rpc(tasvir_area_desc *, tasvir_fnptr, ...);
+bool tasvir_rpc_wait(uint64_t timeout_us, void **retval, tasvir_area_desc *, tasvir_fnptr, ...);
 int tasvir_rpc_register(tasvir_fn_info *);
-bool tasvir_service();
-void tasvir_service_block();
+bool tasvir_service() __attribute__((hot));
+bool tasvir_service_wait(uint64_t timeout_us) __attribute__((hot));
 tasvir_area_desc *tasvir_new(tasvir_area_desc d);
-tasvir_area_desc *tasvir_attach(tasvir_area_desc *pd, const char *name, tasvir_node *node);
+tasvir_area_desc *tasvir_attach(tasvir_area_desc *pd, const char *name, tasvir_node *node, bool writer);
+tasvir_area_desc *tasvir_attach_wait(tasvir_area_desc *pd, const char *name, tasvir_node *node, bool writer,
+                                     uint64_t timeout_us);
 int tasvir_detach(tasvir_area_desc *d);
 int tasvir_delete(tasvir_area_desc *d);
-void tasvir_set_owner(tasvir_area_desc *d, tasvir_thread *owner);
+bool tasvir_update_owner(tasvir_area_desc *d, tasvir_thread *owner);
 
 static inline void *tasvir_data(tasvir_area_desc *d) { return d->h + 1; }
 
 /* log impl */
-static inline void *tasvir_log2data(void *log) {
+static inline void *__attribute__((hot)) tasvir_log2data(const void *log) {
     return (uint8_t *)((uintptr_t)log << TASVIR_SHIFT_BYTE) +
            (TASVIR_ADDR_DATA - (TASVIR_ADDR_LOG << TASVIR_SHIFT_BYTE));
 }
 
-static inline uint64_t tasvir_data2log_bit_offset(void *data) {
+static inline uint64_t __attribute__((hot)) tasvir_data2log_bit_offset(const void *data) {
     return _pext_u64((uintptr_t)data, ((1UL << TASVIR_SHIFT_UNIT) - 1) & (~0UL << TASVIR_SHIFT_BIT));
 }
 
-static inline tasvir_log_t *tasvir_data2log(void *data) {
+static inline tasvir_log_t *__attribute__((hot)) tasvir_data2log(const void *data) {
     return (tasvir_log_t *)TASVIR_ADDR_LOG +
            _pext_u64((uintptr_t)data, (TASVIR_SIZE_DATA - 1) & (~0UL << TASVIR_SHIFT_UNIT));
 }
 
-static inline void *tasvir_data2shadow(void *data) { return (uint8_t *)data + TASVIR_ADDR_SHADOW - TASVIR_ADDR_DATA; }
+static inline void *__attribute__((hot)) tasvir_data2shadow(void *data) {
+    return (uint8_t *)data + TASVIR_ADDR_SHADOW - TASVIR_ADDR_DATA;
+}
 
-static inline void tasvir_log_write(void *data, size_t len) {
-    void *data_end = (uint8_t *)data + len;
+static inline void __attribute__((hot)) tasvir_log_write(const void *data, size_t len) {
+    const void *data_end = (const uint8_t *)data + len;
     tasvir_log_t *log = tasvir_data2log(data);
     tasvir_log_t *data_end_log = tasvir_data2log(data_end);
     uint64_t bit_start = tasvir_data2log_bit_offset(data);

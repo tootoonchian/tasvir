@@ -89,8 +89,8 @@ int main(int argc, char **argv) {
     }
 
     while (true) {
-        tasvir_service_block();
-        rte_delay_us_block(5);
+        tasvir_service();
+        rte_delay_us_block(1);
     }
 
     return 0;

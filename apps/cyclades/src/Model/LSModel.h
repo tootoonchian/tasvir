@@ -17,7 +17,6 @@
 #ifndef _LSMODEL_
 #define _LSMODEL_
 
-#include <sstream>
 #include "Model/Model.h"
 
 class LSModel : public Model {
@@ -52,13 +51,13 @@ private:
         std::stringstream input(input_line);
         input >> n_coords;
 
-        _n_data = 1;
         _n_coords = 1;
         _n_params = n_coords;
 
-        // Initialize model.
-        _data[0] = tasvir::TasvirArray<double>::Allocate("model0", FLAGS_wid, FLAGS_n_threads,
-                                                         NumParameters() * NumCoordinates());
+        // Allocate memory.
+        _loss = tasvir::Array<double>::Allocate("loss", FLAGS_wid, FLAGS_n_threads, 1);
+        _data =
+            tasvir::Array<double>::Allocate("model", FLAGS_wid, FLAGS_n_threads, NumParameters() * NumCoordinates());
     }
 
 public:
@@ -76,24 +75,36 @@ public:
         MatrixVectorMultiply(datapoints, rand_vect, B);
 
         // Add some noise to B.
-        for (int i = 0; i < datapoints.size(); i++) {
-            // B[i] += rand() % FLAGS_random_range;
-        }
+        /*
+        for (int i = 0; i < datapoints.size(); i++)
+            B[i] += rand() % FLAGS_random_range;
+        */
     }
 
     double ComputeLoss(const std::vector<Datapoint *> &datapoints) override {
-        double loss = 0;
-        for (const auto &datapoint : datapoints) {
+        _loss->Barrier();
+        size_t nr_datapoints = datapoints.size();
+        size_t batch_size = nr_datapoints / FLAGS_n_threads + (nr_datapoints % FLAGS_n_threads > 0);
+        size_t index_lo = FLAGS_wid * batch_size;
+        size_t index_hi = std::min(nr_datapoints, index_lo + batch_size);
+
+        tasvir_log_write(&_loss->DataWorker()[0], sizeof(double));
+        _loss->DataWorker()[0] = 0;
+        for (size_t i = index_lo; i < index_hi; i++) {
+            const auto &c = datapoints[i]->GetCoordinates();
+            const auto &w = datapoints[i]->GetWeights();
             double cross_product = 0;
-            int row = ((LSDatapoint *)datapoint)->row;
-            for (int j = 0; j < datapoint->GetCoordinates().size(); j++) {
-                int index = datapoint->GetCoordinates()[j];
-                double weight = datapoint->GetWeights()[j];
-                cross_product += weight * Data1D(index, false);
-            }
-            loss += pow((cross_product - B[row]), 2);
+            int row = ((LSDatapoint *)datapoints[i])->row;
+            for (int j = 0; j < c.size(); j++)
+                cross_product += w[j] * Data(c[j], true);
+            _loss->DataWorker()[0] += pow((cross_product - B[row]), 2);
         }
-        return loss / datapoints.size();
+
+        _loss->Barrier();
+        _loss->ReduceAdd();
+        _loss->Barrier();
+
+        return _loss->DataMaster()[0] / nr_datapoints;
     }
 
     void PrecomputeCoefficients(const Datapoint &datapoint, Gradient &g, Model &local_model) override {
@@ -104,7 +115,7 @@ public:
         for (int i = 0; i < datapoint.GetCoordinates().size(); i++) {
             int index = datapoint.GetCoordinates()[i];
             double weight = datapoint.GetWeights()[i];
-            cp += weight * local_model.Data1D(index, false);
+            cp += weight * local_model.Data(index, false);
         }
         double partial_grad = 2 * (cp - B[row]);
         for (int i = 0; i < datapoint.GetCoordinates().size(); i++) {

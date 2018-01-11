@@ -39,12 +39,12 @@ generate_cmd() {
         local pmucmd="/opt/tools/pmu-tools/toplev.py -l4 -S"
         local stdbufcmd="stdbuf -o 0 -e 0"
         local redirect
-        if [ $tid != d -a $tid != 0 ]; then
-            bgflag="--background"
-            redirect=">$logfile 2>&1"
-        else
+        if [ $tid == d -o $tid == 0 ]; then
             #gdbcmd="gdb -ex run --args"
             redirect="2>&1 | tee $logfile"
+        else
+            bgflag="--background"
+            redirect=">$logfile 2>&1"
         fi
         #bgflag=""
         #gdbcmd="gdb -ex run --args"
@@ -87,6 +87,7 @@ generate_cmd() {
     cmd+="new-window -t $session -n $window-$w '. $RUNSCRIPT; $cmd_thread; cleanup;'\; "
 
     for tid in `seq 0 $((nthreads - 1))`; do
+        [ $tid -ne 0 -a $((tid % 16)) -eq 0 ] && cmd+="; byobu "
         [ $tid -ne 0 -a $((tid % 4)) -eq 0 ] && cmd+="new-window -t $session -n $window-$((++w)) " || cmd+="split-window -t $session:$window-$w "
         generate_cmd_thread $cmd_app
         # run the worker
@@ -121,12 +122,30 @@ ycsb() {
 }
 
 cyclades() {
+    model=${model:-matrix_completion}
+    #model=${model:-least_squares}
+    #model=${model:-word_embeddings}
+    #model=${model:-matrix_inverse}
     updater=${updater:-sparse_sgd}
+    #updater=${updater:-saga}
+    trainer=${trainer:-cyclades_trainer}
     nepochs=${nepoch:-11}
     batch=${batch:-2000}
+    #batch=${batch:-4250}
+    #batch=${batch:-1000}
+    dataset=${dataset:-/opt/tasvir/apps/cyclades/data/movielens/ml-1m/movielens_1m.data}
+    #dataset=${dataset:-/opt/tasvir/apps/cyclades/data/word_embeddings/w2v_graph}
+    #dataset=${dataset:-/opt/tasvir/apps/cyclades/data/nh2010/nh2010/nh2010.data}
+    learning_rate=${learning_rate:-2e-2}
+    #learning_rate=${learning_rate:-1e-10}
+    #learning_rate=${learning_rate:-3e-14}
+
+    [ ! -z "$model" ] && model=--$model
+    [ ! -z "$updater" ] && updater=--$updater
+    [ ! -z "$trainer" ] && trainer=--$trainer
 
     cleanup
-    eval $(generate_cmd $TASVIR_BINDIR/tasvir_cyclades -wid %TID% -core %CORE% --print_loss_per_epoch --print_partition_time --n_threads=%NTHREADS% --learning_rate=2e-2 -matrix_completion -cyclades_trainer -cyclades_batch_size=$batch -n_epochs=$nepochs -$updater --data_file=/opt/tasvir/apps/cyclades/data/movielens/ml-1m/movielens_1m.data)
+    eval $(generate_cmd $TASVIR_BINDIR/tasvir_cyclades --wid %TID% --core %CORE% --print_loss_per_epoch --print_partition_time --n_threads=%NTHREADS% --learning_rate=$learning_rate $model $updater $trainer --cyclades_batch_size=$batch --n_epochs=$nepochs --data_file=$dataset)
 }
 
 setup_env() {
