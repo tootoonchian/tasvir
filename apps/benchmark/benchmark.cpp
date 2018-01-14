@@ -99,7 +99,7 @@ int main(int argc, char **argv) {
         return -1;
     }
 
-    tasvir_area_desc param;
+    tasvir_area_desc param = {};
     param.pd = root_desc;
     param.owner = NULL;
     param.type = TASVIR_AREA_TYPE_APP;

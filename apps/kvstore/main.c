@@ -273,8 +273,8 @@ inline void timespec_diff(struct timespec *start, struct timespec *stop, struct 
 
 static void *thread_code(void *init_struct) {
     struct thread_init *args = (struct thread_init *)init_struct;
-    tasvir_area_desc param;
-    tasvir_area_desc param_lock;
+    tasvir_area_desc param = {};
+    tasvir_area_desc param_lock = {};
     tasvir_area_desc *d[MAX_SERVERS] = {NULL};
     tasvir_area_desc *l[MAX_SERVERS] = {NULL};  // Used for barrier
     tasvir_area_desc *root_desc = NULL;
