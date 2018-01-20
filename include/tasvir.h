@@ -27,11 +27,11 @@ extern "C" {
 typedef uint64_t tasvir_log_t;
 typedef unsigned long tasvir_arg_promo_t;
 
-#define TASVIR_BARRIER_ENTER_US (200)             /* max time to enter sync */
-#define TASVIR_STAT_US (1 * 1000 * 1000)          /* stat interval */
-#define TASVIR_SYNC_INTERNAL_US (100 * 1000)      /* sync interval */
-#define TASVIR_SYNC_EXTERNAL_US (1 * 1000 * 1000) /* sync interval */
-#define TASVIR_HEARTBEAT_US (1 * 1000 * 1000)     /* timer to announce a thread dead */
+#define TASVIR_BARRIER_ENTER_US (200)         /* max time to enter sync */
+#define TASVIR_STAT_US (1 * 1000 * 1000)      /* stat interval */
+#define TASVIR_SYNC_INTERNAL_US (10 * 1000)   /* sync interval */
+#define TASVIR_SYNC_EXTERNAL_US (100 * 1000)  /* sync interval */
+#define TASVIR_HEARTBEAT_US (1 * 1000 * 1000) /* timer to announce a thread dead */
 
 #define TASVIR_ETH_PROTO (0x88b6)
 #define TASVIR_HUGEPAGE_SIZE (size_t)(2 << 20)
@@ -39,7 +39,6 @@ typedef unsigned long tasvir_arg_promo_t;
 #define TASVIR_NR_AREA_LOGS (4)
 #define TASVIR_NR_CACHELINES_PER_MSG (21)
 #define TASVIR_NR_FN (4096)
-#define TASVIR_NR_LOG_ENTRIES (1024)
 #define TASVIR_NR_RPC_ARGS (8)
 #define TASVIR_NR_RPC_MSG (65536)
 #define TASVIR_NR_NODES_AREA (64)
@@ -211,7 +210,7 @@ struct tasvir_msg_mem {
     tasvir_msg h;
     void *addr;
     size_t len;
-    tasvir_cacheline line[TASVIR_NR_CACHELINES_PER_MSG];
+    tasvir_cacheline line[TASVIR_NR_CACHELINES_PER_MSG] __attribute__((aligned(TASVIR_CACHELINE_BYTES)));
 } __attribute__((__packed__));
 
 struct tasvir_rpc_status {
@@ -264,7 +263,7 @@ struct tasvir_area_header {
     struct {
         bool rw; /* used to id the writer version */
         bool local;
-    } private_tag; /* not to ever be synced */
+    } private_tag; /* not to be synced */
     tasvir_area_desc *d __attribute__((aligned(1 << TASVIR_SHIFT_BIT)));
     uint64_t version;
     uint64_t update_us;
