@@ -165,6 +165,10 @@ static void rpc_tasvir_init_finish(void *v, ptrdiff_t *o) { *(bool *)R = tasvir_
 
 static void rpc_tasvir_new(void *v, ptrdiff_t *o) { *(tasvir_area_desc **)R = tasvir_new(*(tasvir_area_desc *)X(0)); }
 
+static void rpc_tasvir_sync_area_external_boot(void *v, ptrdiff_t *o) {
+    *(size_t *)R = tasvir_sync_area_external_boot(*(tasvir_area_desc **)X(0), *(bool *)X(1));
+}
+
 static void rpc_tasvir_update_owner(void *v, ptrdiff_t *o) {
     *(bool *)R = tasvir_update_owner(*(tasvir_area_desc **)X(0), *(tasvir_thread **)X(1));
 }
@@ -376,6 +380,14 @@ static inline void tasvir_init_rpc() {
         .argc = 2,
         .ret_len = sizeof(int),
         .arg_lens = {sizeof(tasvir_area_desc *), sizeof(tasvir_node *)},
+    });
+    tasvir_rpc_register(&(tasvir_fn_info){
+        .fnptr = &rpc_tasvir_sync_area_external_boot,
+        .name = "tasvir_sync_area_external_boot",
+        .fid = 7,
+        .argc = 2,
+        .ret_len = sizeof(int),
+        .arg_lens = {sizeof(tasvir_area_desc *), sizeof(bool)},
     });
 }
 
@@ -860,10 +872,12 @@ tasvir_area_desc *tasvir_new(tasvir_area_desc desc) {
     }
 
     size_t size_metadata = sizeof(tasvir_area_header) + desc.nr_areas_max * sizeof(tasvir_area_desc);
-    desc.offset_log_end = TASVIR_ALIGN(size_metadata + !is_container * desc.len);
+    if (is_owner)
+        desc.offset_log_end = TASVIR_ALIGN(size_metadata + !is_container * desc.len);
     size_t offset_log = TASVIR_ALIGN(size_metadata + desc.len);
     size_t size_log = TASVIR_ALIGNX(desc.offset_log_end >> TASVIR_SHIFT_BYTE, sizeof(tasvir_log_t));
-    desc.len = offset_log + TASVIR_ALIGN(TASVIR_NR_AREA_LOGS * size_log);
+    if (is_owner)
+        desc.len = offset_log + TASVIR_ALIGN(TASVIR_NR_AREA_LOGS * size_log);
 
     assert(is_root_area || desc.pd->type == TASVIR_AREA_TYPE_CONTAINER);
     assert(!is_root_area || is_container);
@@ -987,7 +1001,13 @@ static inline int tasvir_attach_helper(tasvir_area_desc *d, tasvir_node *node) {
             tasvir_log_write(&d->h->users[d->h->nr_users], sizeof(tasvir_area_user));
         }
 
-        tasvir_sync_area_external_boot(d, true);
+        if (ttld.is_daemon) {
+            tasvir_sync_area_external_boot(d, true);
+        } else if (!tasvir_rpc_wait(S2US, NULL, ttld.node_desc, &rpc_tasvir_sync_area_external_boot, d, true)) {
+            LOG_ERR("rpc_tasvir_sync_area_external_boot failed");
+            return -1;
+        }
+
         /* FIXME: hack to receive thread id info */
         if (d == ttld.root_desc) {
             tasvir_area_desc *c = tasvir_data(d);
@@ -1178,6 +1198,7 @@ static tasvir_rpc_status *tasvir_vrpc(tasvir_area_desc *d, tasvir_fnptr fnptr, v
     /* garbage collect a previous status */
     if (rs->response)
         rte_mempool_put(ttld.ndata->mp, (void *)rs->response);
+    rs->do_free = false;
     rs->id = msg->h.id;
     rs->status = TASVIR_RPC_STATUS_PENDING;
     rs->response = NULL;
@@ -1281,11 +1302,14 @@ static void tasvir_service_rpc_request(tasvir_msg_rpc *msg) {
     }
 }
 
-static void tasvir_service_rpc_response(tasvir_msg_rpc *msg) {
-    assert(msg->h.id < TASVIR_NR_RPC_MSG);
-    tasvir_rpc_status *rs = &ttld.status_l[msg->h.id];
+static void tasvir_service_rpc_response(tasvir_msg_rpc *m) {
+    assert(m->h.id < TASVIR_NR_RPC_MSG);
+    tasvir_rpc_status *rs = &ttld.status_l[m->h.id];
     rs->status = TASVIR_RPC_STATUS_DONE;
-    rs->response = msg;
+    if (rs->do_free)
+        rte_mempool_put(ttld.ndata->mp, (void *)m);
+    else
+        rs->response = m;
 }
 
 static void tasvir_service_msg_mem(tasvir_msg_mem *m) {
@@ -1703,8 +1727,8 @@ static inline size_t tasvir_sync_area_external_boot(tasvir_area_desc *d, bool bo
 
         if (nbits_unit_left == 0) {
             nbits_unit_left = MIN(TASVIR_LOG_UNIT_BITS, nbits_total - nbits_seen);
-            log_val = 0;
-            for (i = 0; i < pivot; i++) {
+            log_val = *log[0];
+            for (i = 1; i < pivot; i++) {
                 log[i]++;
                 log_val |= *log[i];
             }

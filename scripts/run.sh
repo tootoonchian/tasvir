@@ -1,7 +1,7 @@
 #!/bin/bash
-TASVIR_SRCDIR=/opt/tasvir
+RUNSCRIPT=$(realpath $0)
+TASVIR_SRCDIR=$(realpath `dirname $RUNSCRIPT`/..)
 TASVIR_BINDIR=$TASVIR_SRCDIR/build/bin
-RUNSCRIPT=$TASVIR_SRCDIR/scripts/run.sh #$(realpath $0)
 PIDFILE_PREFIX=/var/run/tasvir-
 
 declare -A HOST_NIC=( ["c12"]="87:00.0" ["c13"]="83:00.0" ["c15"]="87:00.0" ["c101"]="05:00.0" ["c102"]="05:00.0" ["c103"]="05:00.0" ["c104"]="05:00.0" ["c105"]="05:00.0" ["c106"]="05:00.0" ["c107"]="05:00.0" ["c108"]="05:00.0" ["c109"]="05:00.0" ["c110"]="05:00.0" ["c111"]="05:00.0" ["c112"]="05:00.0" ["c113"]="05:00.0" ["c114"]="05:00.0" ["c115"]="05:00.0" ["c116"]="05:00.0" ["c121"]="05:00.0" ["c122"]="05:00.0" ["c123"]="05:00.0" ["c124"]="05:00.0" ["c125"]="05:00.0" ["c126"]="05:00.0" ["c127"]="05:00.0" ["c128"]="05:00.0" ["c129"]="05:00.0" ["c130"]="05:00.0" ["c131"]="05:00.0" ["c132"]="05:00.0" ["c133"]="05:00.0" ["c134"]="05:00.0" ["c135"]="0a:00.0" ["c136"]="0a:00.0" )
@@ -70,6 +70,7 @@ generate_cmd() {
 
     local host_counter=0
     local host_list=("${host_list[@]:-${HOST_ALL[@]}}")
+    local host=${host_list[0]}
 
     local cmd
     local cmd_app="$*"
@@ -88,37 +89,41 @@ generate_cmd() {
     cmd_byobu+="set-option -gq mouse-select-pane on\; "
     cmd_byobu+="set-option -gq mouse-select-window on\; "
     cmd_byobu+="set-window-option -gq mode-mouse on\; "
-    cmd_byobu+="set-window-option -gq remain-on-exit off\; "
+    cmd_byobu+="set-window-option -gq remain-on-exit on\; "
     tmux has-session -t $session &>/dev/null || cmd_byobu+="new-session -Ads $session\; "
 
     cmd="$cmd_byobu"
     [ -z $TMUX ] && cmd+="attach-session -t $session\; " || cmd+="switch-client -t $session\; "
 
     for tid in `seq 0 $((nthreads - 1))`; do
-        local host=${host_list[$host_counter]}
         [ $tid -ne 0 -a $((tid % 16)) -eq 0 ] && cmd+="; $cmd_byobu "
-
-        if [ $tid -eq 0 -o $((threads_this + 1)) -eq "${host_nthreads[$host]}" ]; then
+        if [ $threads_this -eq "${host_nthreads[$host]}" ]; then
+            ((host_counter++))
+            host=${host_list[$host_counter]}
+            threads_this=0
+        fi
+        if [ $threads_this -eq 0 ]; then
+        [ $tid -ne 0 ] && cmd+="select-layout "$([ $w -le 1 ] && echo main-horizontal || echo tiled)"\; "
             # run the daemon
             local pciaddr=${HOST_NIC[$host]}
             local core=$((HOST_NCORES[$host] - 1))
             local cmd_daemon="$TASVIR_BINDIR/tasvir_daemon --core %CORE% --pciaddr $pciaddr"$([ $tid -eq 0 ] && echo " --root")
-
-            cmd_ssh=$([ $HOSTNAME != "$host" ] && echo "ssh -t $host")
-            window=$host-n$nthreads-$timestamp
-
             local tid2=$tid
             tid=d
+            cmd_ssh=$([ $HOSTNAME != "$host" ] && echo "ssh -t $host")
+            w=-1
+            window=$host-n$nthreads-$timestamp-$((++w))
             generate_cmd_thread $cmd_daemon
-            cmd+="new-window -t $session -n $window-$((++w)) $cmd_ssh '. $RUNSCRIPT; prepare; $cmd_thread; prepare;'\; "
-            cmd+="split-window -t $session:$window-$w "
+            cmd+="new-window -t $session -n $window $cmd_ssh '. $RUNSCRIPT; prepare; $cmd_thread; prepare;'\; "
+            cmd+="split-window -t $session:$window "
             tid=$tid2
-            threads_this=0
-            ((host_counter++))
+            threads_this=1
         elif [ $tid -ne 0 -a $((tid % 4)) -eq 0 ]; then
-            cmd+="new-window -t $session -n $window-$((++w)) "
+            [ $tid -ne 0 ] && cmd+="select-layout "$([ $w -eq 1 ] && echo main-horizontal || echo tiled)"\; "
+            window=$host-$nthreads-$timestamp-$((++w))
+            cmd+="new-window -t $session -n $window "
         else
-            cmd+="split-window -t $session:$window-$w "
+            cmd+="split-window -t $session:$window "
         fi
 
         # run the worker
@@ -128,11 +133,7 @@ generate_cmd() {
         ((threads_this++))
     done
 
-    cmd+="select-layout -t $session:$window-0 main-horizontal\; "
-    for wid in `seq 1 $w`; do
-        cmd+="select-layout -t $session:$window-$wid tiled \; "
-    done
-
+    cmd+="select-layout "$([ $w -eq 0 ] && echo main-horizontal || echo tiled)"\; "
     echo "$cmd"
 }
 
@@ -152,28 +153,25 @@ benchmark() {
 
 monitor() {
     # first host is root
-    declare -a host_list=( c15 c12 c101 c102 c103 c104 c105 c106 c107 c108 c109 c110 c111 c112 c113 c114 c115 c116 c121 c122 c123 c124 c125 c126 c127 c128 c129 c130 c131 c132 c133 c134 c135 c136 )
-    declare -A host_nthreads=( ["c12"]=2 ["c13"]=2 ["c15"]=2 ["c101"]=2 ["c121"]=2 ["c103"]=2 ["c104"]=2 ["c105"]=2 ["c106"]=2 ["c107"]=2 ["c108"]=2 ["c109"]=2 ["c110"]=2 ["c111"]=2 ["c112"]=2 ["c113"]=2 ["c114"]=2 ["c115"]=2 ["c116"]=2 ["c121"]=2 ["c122"]=2 ["c123"]=2 ["c124"]=2 ["c125"]=2 ["c126"]=2 ["c127"]=2 ["c128"]=2 ["c129"]=2 ["c130"]=2 ["c131"]=2 ["c132"]=2 ["c133"]=2 ["c134"]=2 ["c135"]=2 ["c136"]=2 )
-    nthreads=${nthreads:-1}
+    declare -a host_list=( c13 c12 )
+    declare -A host_nthreads=( ["c13"]=3 ["c12"]=3 )
+    nthreads=${nthreads:-4}
 
     eval $(generate_cmd $TASVIR_BINDIR/tasvir_monitor %TID% %CORE% %NTHREADS%)
 }
 
+tasvir_openflow() { ## should be run in local
+    declare -a host_list=( c13 )
+    declare -A host_nthreads=( ["c13"]=4 )
+    nthreads=${nthreads:-2}
 
-tasvir_openflow() {
-    # first host is root
-    declare -a host_list=( c15 c12 c101 c102 c103 c104 c105 c106 c107 c108 c109 c110 c111 c112 c113 c114 c115 c116 c121 c122 c123 c124 c125 c126 c127 c128 c129 c130 c131 c132 c133 c134 c135 c136 )
-    declare -A host_nthreads=( ["c12"]=2 ["c13"]=2 ["c15"]=2 ["c101"]=2 ["c121"]=2 ["c103"]=2 ["c104"]=2 ["c105"]=2 ["c106"]=2 ["c107"]=2 ["c108"]=2 ["c109"]=2 ["c110"]=2 ["c111"]=2 ["c112"]=2 ["c113"]=2 ["c114"]=2 ["c115"]=2 ["c116"]=2 ["c121"]=2 ["c122"]=2 ["c123"]=2 ["c124"]=2 ["c125"]=2 ["c126"]=2 ["c127"]=2 ["c128"]=2 ["c129"]=2 ["c130"]=2 ["c131"]=2 ["c132"]=2 ["c133"]=2 ["c134"]=2 ["c135"]=2 ["c136"]=2 )
-    nthreads=${nthreads:-1}
-
-    eval $(generate_cmd $TASVIR_BINDIR/tasvir_openflow %TID% %CORE% %NTHREADS%)
+    eval $(generate_cmd $TASVIR_BINDIR/openflow %TID% %CORE% %NTHREADS%)
 }
 
-openflow() {
-    # first host is root
-    declare -a host_list=( c15 c12 c101 c102 c103 c104 c105 c106 c107 c108 c109 c110 c111 c112 c113 c114 c115 c116 c121 c122 c123 c124 c125 c126 c127 c128 c129 c130 c131 c132 c133 c134 c135 c136 )
-    declare -A host_nthreads=( ["c12"]=2 ["c13"]=2 ["c15"]=2 ["c101"]=2 ["c121"]=2 ["c103"]=2 ["c104"]=2 ["c105"]=2 ["c106"]=2 ["c107"]=2 ["c108"]=2 ["c109"]=2 ["c110"]=2 ["c111"]=2 ["c112"]=2 ["c113"]=2 ["c114"]=2 ["c115"]=2 ["c116"]=2 ["c121"]=2 ["c122"]=2 ["c123"]=2 ["c124"]=2 ["c125"]=2 ["c126"]=2 ["c127"]=2 ["c128"]=2 ["c129"]=2 ["c130"]=2 ["c131"]=2 ["c132"]=2 ["c133"]=2 ["c134"]=2 ["c135"]=2 ["c136"]=2 )
-    nthreads=${nthreads:-1}
+openflow() { ## should be run in local
+    declare -a host_list=( c13 )
+    declare -A host_nthreads=( ["c13"]=4 )
+    nthreads=${nthreads:-2}
 
     eval $(generate_cmd $TASVIR_BINDIR/openflow %TID% %CORE% %NTHREADS%)
 }
@@ -183,7 +181,6 @@ ycsb() {
     declare -a host_list=( c15 c12 c101 c102 c103 c104 c105 c106 c107 c108 c109 c110 c111 c112 c113 c114 c115 c116 c121 c122 c123 c124 c125 c126 c127 c128 c129 c130 c131 c132 c133 c134 c135 c136 )
     declare -A host_nthreads=( ["c12"]=2 ["c13"]=2 ["c15"]=2 ["c101"]=2 ["c121"]=2 ["c103"]=2 ["c104"]=2 ["c105"]=2 ["c106"]=2 ["c107"]=2 ["c108"]=2 ["c109"]=2 ["c110"]=2 ["c111"]=2 ["c112"]=2 ["c113"]=2 ["c114"]=2 ["c115"]=2 ["c116"]=2 ["c121"]=2 ["c122"]=2 ["c123"]=2 ["c124"]=2 ["c125"]=2 ["c126"]=2 ["c127"]=2 ["c128"]=2 ["c129"]=2 ["c130"]=2 ["c131"]=2 ["c132"]=2 ["c133"]=2 ["c134"]=2 ["c135"]=2 ["c136"]=2 )
     nthreads=${nthreads:-1}
-
     ycsb_dir=$TASIR_SRCDIR/misc/YCSB-C
 
     eval $(generate_cmd $TASVIR_BINDIR/kvstore -s %TID% -n 2 -c %CORE% -a $ycsb_dir/wtest-2.access -l $ycsb_dir/wtest-2.load)
