@@ -40,12 +40,14 @@ typedef unsigned long tasvir_arg_promo_t;
 #define TASVIR_NR_CACHELINES_PER_MSG (21)
 #define TASVIR_NR_FN (4096)
 #define TASVIR_NR_RPC_ARGS (8)
-#define TASVIR_NR_RPC_MSG (65536)
+#define TASVIR_NR_RPC_MSG (64 * 1024)
 #define TASVIR_NR_NODES_AREA (64)
 #define TASVIR_NR_SOCKETS (2)
 #define TASVIR_NR_SYNC_JOBS (2048)
 #define TASVIR_NR_THREADS_LOCAL (64)
-#define TASVIR_RING_SIZE (64)
+#define TASVIR_PKT_BURST (32)
+#define TASVIR_RING_SIZE (256)
+#define TASVIR_RING_EXT_SIZE (2048)
 #define TASVIR_STRLEN_MAX (32)
 #define TASVIR_SYNC_JOB_BYTES (size_t)(1 << 21) /* max size of each job */
 #define TASVIR_THREAD_DAEMON_IDX (0)
@@ -128,11 +130,12 @@ static const char *tasvir_area_type_str[] = {"invalid", "contianer", "node", "ap
 typedef enum {
     TASVIR_MSG_TYPE_INVALID = 0,
     TASVIR_MSG_TYPE_MEM,
+    TASVIR_MSG_TYPE_RPC_ONEWAY,
     TASVIR_MSG_TYPE_RPC_REQUEST,
     TASVIR_MSG_TYPE_RPC_RESPONSE
 } tasvir_msg_type;
 
-static const char *tasvir_msg_type_str[] = {"invalid", "memory", "rpc_request", "rpc_reply"};
+static const char *tasvir_msg_type_str[] = {"invalid", "memory", "rpc_oneway", "rpc_request", "rpc_reply"};
 
 typedef enum {
     TASVIR_RPC_STATUS_INVALID = 0,
@@ -166,6 +169,7 @@ struct tasvir_fn_info {
     tasvir_str name;
     tasvir_fnptr fnptr;
     uint32_t fid;
+    uint8_t oneway;
     uint8_t argc;
     int ret_len;
     size_t arg_lens[TASVIR_NR_RPC_ARGS];
@@ -280,6 +284,8 @@ struct tasvir_sync_stats {
     uint64_t cumbytes;
     uint64_t cumbytes_rx;
     uint64_t cumpkts_rx;
+    uint64_t cumbytes_tx;
+    uint64_t cumpkts_tx;
 };
 
 struct tasvir_node {

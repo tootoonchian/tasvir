@@ -10,6 +10,7 @@ declare -A HOST_NCORES=( ["c12"]=24 ["c13"]=24 ["c15"]=36 ["c101"]=16 ["c102"]=1
 declare -a HOST_ALL=(c15 c12 c13 c101 c102 c103 c104 c105 c106 c107 c108 c109 c110 c111 c112 c113 c114 c115 c116 c121 c122 c123 c124 c125 c126 c127 c128 c129 c130 c131 c132 c133 c134 c135 c136)
 
 prepare() {
+    echo never >/sys/kernel/mm/transparent_hugepage/enabled
     sysctl vm.nr_hugepages=1050 &>/dev/null
 
     modprobe igb_uio &>/dev/null
@@ -89,7 +90,7 @@ generate_cmd() {
     cmd_byobu+="set-option -gq mouse-select-pane on\; "
     cmd_byobu+="set-option -gq mouse-select-window on\; "
     cmd_byobu+="set-window-option -gq mode-mouse on\; "
-    cmd_byobu+="set-window-option -gq remain-on-exit on\; "
+    cmd_byobu+="set-window-option -gq remain-on-exit off\; "
     tmux has-session -t $session &>/dev/null || cmd_byobu+="new-session -Ads $session\; "
 
     cmd="$cmd_byobu"
@@ -103,7 +104,7 @@ generate_cmd() {
             threads_this=0
         fi
         if [ $threads_this -eq 0 ]; then
-        [ $tid -ne 0 ] && cmd+="select-layout "$([ $w -le 1 ] && echo main-horizontal || echo tiled)"\; "
+            [ $tid -ne 0 ] && cmd+="select-layout "$([ $w -le 1 ] && echo main-horizontal || echo tiled)"\; "
             # run the daemon
             local pciaddr=${HOST_NIC[$host]}
             local core=$((HOST_NCORES[$host] - 1))
