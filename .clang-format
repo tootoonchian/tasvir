@@ -1,12 +1,14 @@
 BasedOnStyle: google
-UseTab: Never
-IndentWidth: 4
-# BreakBeforeBraces: Allman
+
+AlignTrailingComments: true
 AlwaysBreakAfterDefinitionReturnType: false
+AlwaysBreakTemplateDeclarations: true
 AllowShortIfStatementsOnASingleLine: false
 AllowShortLoopsOnASingleLine: false
-IndentCaseLabels: false
+#BreakBeforeBraces: Allman
 ColumnLimit: 120
-AccessModifierOffset: -4
-AlwaysBreakTemplateDeclarations: true
-Standard: C++11
+IndentCaseLabels: false
+IndentWidth: 4
+MaxEmptyLinesToKeep: 2
+Standard: Cpp11
+UseTab: Never

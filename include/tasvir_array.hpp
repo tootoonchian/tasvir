@@ -11,7 +11,7 @@ namespace tasvir {
 
 template <typename T = double>
 class Array {
-public:
+   public:
     typedef T value_type;
     typedef size_t size_type;
 
@@ -76,7 +76,7 @@ public:
             std::copy(&_master->_data[c[0]], &_master->_data[c[1]], &_data[c[0]]);
     }
 
-private:
+   private:
     size_type _size; /* the number of elements in the array */
 
     std::size_t _nr_workers; /* number of workers under this */
@@ -119,7 +119,8 @@ Array<T>* Array<T>::Allocate(const char* prefix, uint64_t wid, std::size_t nr_wo
     param.owner = NULL;
     param.type = TASVIR_AREA_TYPE_APP;
     param.len = sizeof(T) * nr_elements + sizeof(Array<T>);
-    param.stale_us = 50000;
+    param.sync_int_us = 50000;
+    param.sync_ext_us = 500000;
     snprintf(param.name, sizeof(param.name), "%s-%d", prefix, wid);
     d = tasvir_new(param);
     if (!d) {
@@ -141,7 +142,8 @@ Array<T>* Array<T>::Allocate(const char* prefix, uint64_t wid, std::size_t nr_wo
         param.owner = NULL;
         param.type = TASVIR_AREA_TYPE_APP;
         param.len = sizeof(T) * nr_elements + sizeof(Array<T>);
-        param.stale_us = 50000;
+        param.sync_int_us = 50000;
+        param.sync_ext_us = 500000;
         snprintf(param.name, sizeof(param.name), "%s-master", prefix);
         d = tasvir_new(param);
         if (!d) {

@@ -104,7 +104,8 @@ int main(int argc, char **argv) {
     param.owner = NULL;
     param.type = TASVIR_AREA_TYPE_APP;
     param.len = area_len;
-    param.stale_us = 50000;
+    param.sync_int_us = 10000;
+    param.sync_ext_us = 100000;
     snprintf(param.name, sizeof(param.name), "benchmark-%04x", static_cast<uint16_t>(xorshift128plus()));
     tasvir_area_desc *d = tasvir_new(param);
     if (!d) {

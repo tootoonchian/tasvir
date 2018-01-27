@@ -29,8 +29,8 @@ typedef unsigned long tasvir_arg_promo_t;
 
 #define TASVIR_BARRIER_ENTER_US (200)         /* max time to enter sync */
 #define TASVIR_STAT_US (1 * 1000 * 1000)      /* stat interval */
-#define TASVIR_SYNC_INTERNAL_US (10 * 1000)   /* sync interval */
-#define TASVIR_SYNC_EXTERNAL_US (100 * 1000)  /* sync interval */
+#define TASVIR_SYNC_INTERNAL_US (100 * 1000)  /* sync interval */
+#define TASVIR_SYNC_EXTERNAL_US (500 * 1000)  /* sync interval */
 #define TASVIR_HEARTBEAT_US (1 * 1000 * 1000) /* timer to announce a thread dead */
 
 #define TASVIR_ETH_PROTO (0x88b6)
@@ -244,7 +244,8 @@ struct tasvir_area_desc {
         tasvir_str name;
     };
     uint64_t boot_us;
-    uint64_t stale_us;
+    uint64_t sync_int_us;
+    uint64_t sync_ext_us;
     uint8_t type;
     bool active;
 };
