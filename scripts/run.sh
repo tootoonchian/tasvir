@@ -21,14 +21,31 @@ prepare() {
     done
     rm -f /dev/shm/tasvir /dev/hugepages/tasvir* /var/run/.tasvir_config &>/dev/null
 
-    if [ -d /sys/devices/system/cpu/cpu0/cpufreq ]; then
-        max_freq=$(cat /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq)
-        for i in /sys/devices/system/cpu/*/cpufreq; do
-            echo performance > $i/scaling_governor
-            echo $max_freq > $i/scaling_min_freq
-            echo $max_freq > $i/scaling_max_freq
-        done &>/dev/null
-    fi
+    echo 1 > /sys/module/processor/parameters/ignore_ppc
+    echo 0 > /proc/sys/kernel/nmi_watchdog
+    [ -f /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq ] && max_freq=$(cat /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq)
+    for cpu in /sys/devices/system/cpu/cpu[0-9]*; do
+        # fix core frequency
+        if [ -d $cpu/cpufreq ]; then
+            echo performance > $cpu/cpufreq/scaling_governor
+            echo $max_freq > $cpu/cpufreq/scaling_min_freq
+            echo $max_freq > $cpu/cpufreq/scaling_max_freq
+        fi
+        # disable c states
+        if [ -d $cpu/cpuidle ]; then
+            for state in $cpu/cpuidle/state[1-9]/disable; do
+                echo 1 > $state/disable
+            done
+        fi
+        # disable p states
+        if [ -d /sys/devices/system/cpu/intel_pstate ]; then
+            echo 1 > /sys/devices/system/cpu/intel_pstate/no_turbo
+            echo 100 > /sys/devices/system/cpu/intel_pstate/min_perf_pct
+            echo 100 > /sys/devices/system/cpu/intel_pstate/max_perf_pct
+        fi
+    done &>/dev/null
+    # disable uncore frequency scaling
+    wrmsr -a 0x620 0x1d1d
 }
 
 compile() {
@@ -81,7 +98,9 @@ generate_cmd() {
     local w=-1
     local timestamp=`date +"%Y%m%d-%H%M%S"`
     local window
-    local logfile="$(dirname $RUNSCRIPT)/log/$timestamp.n%NTHREADS%.%HOST%.t%TID%"
+    local logdir="$(dirname $RUNSCRIPT)/log/$timestamp"
+    local manifest="$logdir/manifest"
+    local logfile="$logdir/t%TID%.%HOST%"
     local threads_this=0
 
     local cmd_byobu="byobu "
@@ -93,7 +112,8 @@ generate_cmd() {
     cmd_byobu+="set-window-option -gq remain-on-exit off\; "
     tmux has-session -t $session &>/dev/null || cmd_byobu+="new-session -Ads $session\; "
 
-    cmd="$cmd_byobu"
+    cmd="mkdir -p $logdir &>/dev/null;"
+    cmd+="$cmd_byobu"
     [ -z $TMUX ] && cmd+="attach-session -t $session\; " || cmd+="switch-client -t $session\; "
 
     for tid in `seq 0 $((nthreads - 1))`; do
@@ -119,8 +139,8 @@ generate_cmd() {
             cmd+="split-window -t $session:$window "
             tid=$tid2
             threads_this=1
-        elif [ $tid -ne 0 -a $((tid % 4)) -eq 0 ]; then
-            [ $tid -ne 0 ] && cmd+="select-layout "$([ $w -eq 1 ] && echo main-horizontal || echo tiled)"\; "
+        elif [ $((threads_this % 4)) -eq 0 ]; then
+            cmd+="select-layout "$([ $w -eq 1 ] && echo main-horizontal || echo tiled)"\; "
             window=$host-$nthreads-$timestamp-$((++w))
             cmd+="new-window -t $session -n $window "
         else
@@ -128,28 +148,31 @@ generate_cmd() {
         fi
 
         # run the worker
-        local cmd_last= #$([ $tid -eq 0 ] && echo bash)
+        local cmd_last=  # ". $RUNSCRIPT; prepare;"
         generate_cmd_thread $cmd_app
         cmd+="$cmd_ssh 'ulimit -c unlimited; sleep $delay; $cmd_thread; $cmd_last'\; "
         ((threads_this++))
     done
 
     cmd+="select-layout "$([ $w -eq 0 ] && echo main-horizontal || echo tiled)"\; "
+    cmd+="new-window -t $session -n 0 'echo -e nthreads=$nthreads cmd_app=$cmd_app > $manifest' ;"
     echo "$cmd"
 }
 
 benchmark() {
-    nr_writes=$((50 * 1000 * 1000))
-    writes_per_service=100
-    area_len=$((100 * 1024 * 1024))
-    stride=8
+    nr_writes=${nr_writes:-$((50 * 1000 * 1000))}
+    writes_per_service=${writes_per_service:-100}
+    area_len=${area_len:-$((100 * 1024 * 1024))}
+    stride=${stride:-8}
+    sync_int=${sync_int:-10000}
+    sync_ext=${sync_ext:-100000}
 
     # first host is root
-    declare -a host_list=( c15 c12 c101 c102 c103 c104 c105 c106 c107 c108 c109 c110 c111 c112 c113 c114 c115 c116 c121 c122 c123 c124 c125 c126 c127 c128 c129 c130 c131 c132 c133 c134 c135 c136 )
-    declare -A host_nthreads=( ["c12"]=2 ["c13"]=2 ["c15"]=2 ["c101"]=2 ["c121"]=2 ["c103"]=2 ["c104"]=2 ["c105"]=2 ["c106"]=2 ["c107"]=2 ["c108"]=2 ["c109"]=2 ["c110"]=2 ["c111"]=2 ["c112"]=2 ["c113"]=2 ["c114"]=2 ["c115"]=2 ["c116"]=2 ["c121"]=2 ["c122"]=2 ["c123"]=2 ["c124"]=2 ["c125"]=2 ["c126"]=2 ["c127"]=2 ["c128"]=2 ["c129"]=2 ["c130"]=2 ["c131"]=2 ["c132"]=2 ["c133"]=2 ["c134"]=2 ["c135"]=2 ["c136"]=2 )
-    nthreads=${nthreads:-2}
+    declare -a host_list=( c15 c12 c13 c101 c102 c103 c104 c105 c106 c107 c108 c109 c110 c111 c112 c113 c114 c115 c116 c121 c122 c123 c124 c125 c126 c127 c128 c129 c130 c131 c132 c133 c134 c135 c136 )
+    declare -A host_nthreads=( ["c12"]=2 ["c13"]=2 ["c15"]=2 ["c101"]=2 ["c102"]=2 ["c103"]=2 ["c104"]=2 ["c105"]=2 ["c106"]=2 ["c107"]=2 ["c108"]=2 ["c109"]=2 ["c110"]=2 ["c111"]=2 ["c112"]=2 ["c113"]=2 ["c114"]=2 ["c115"]=2 ["c116"]=2 ["c121"]=2 ["c122"]=2 ["c123"]=2 ["c124"]=2 ["c125"]=2 ["c126"]=2 ["c127"]=2 ["c128"]=2 ["c129"]=2 ["c130"]=2 ["c131"]=2 ["c132"]=2 ["c133"]=2 ["c134"]=2 ["c135"]=2 ["c136"]=2 )
+    nthreads=${nthreads:-1}
 
-    eval $(generate_cmd $TASVIR_BINDIR/tasvir_benchmark %CORE% $nr_writes $writes_per_service $area_len $stride)
+    eval $(generate_cmd $TASVIR_BINDIR/tasvir_benchmark %CORE% $nr_writes $writes_per_service $area_len $stride $sync_int $sync_ext)
 }
 
 monitor() {
@@ -180,7 +203,7 @@ openflow() { ## should be run in local
 ycsb() {
     # first host is root
     declare -a host_list=( c15 c12 c101 c102 c103 c104 c105 c106 c107 c108 c109 c110 c111 c112 c113 c114 c115 c116 c121 c122 c123 c124 c125 c126 c127 c128 c129 c130 c131 c132 c133 c134 c135 c136 )
-    declare -A host_nthreads=( ["c12"]=2 ["c13"]=2 ["c15"]=2 ["c101"]=2 ["c121"]=2 ["c103"]=2 ["c104"]=2 ["c105"]=2 ["c106"]=2 ["c107"]=2 ["c108"]=2 ["c109"]=2 ["c110"]=2 ["c111"]=2 ["c112"]=2 ["c113"]=2 ["c114"]=2 ["c115"]=2 ["c116"]=2 ["c121"]=2 ["c122"]=2 ["c123"]=2 ["c124"]=2 ["c125"]=2 ["c126"]=2 ["c127"]=2 ["c128"]=2 ["c129"]=2 ["c130"]=2 ["c131"]=2 ["c132"]=2 ["c133"]=2 ["c134"]=2 ["c135"]=2 ["c136"]=2 )
+    declare -A host_nthreads=( ["c12"]=2 ["c13"]=2 ["c15"]=2 ["c101"]=2 ["c102"]=2 ["c103"]=2 ["c104"]=2 ["c105"]=2 ["c106"]=2 ["c107"]=2 ["c108"]=2 ["c109"]=2 ["c110"]=2 ["c111"]=2 ["c112"]=2 ["c113"]=2 ["c114"]=2 ["c115"]=2 ["c116"]=2 ["c121"]=2 ["c122"]=2 ["c123"]=2 ["c124"]=2 ["c125"]=2 ["c126"]=2 ["c127"]=2 ["c128"]=2 ["c129"]=2 ["c130"]=2 ["c131"]=2 ["c132"]=2 ["c133"]=2 ["c134"]=2 ["c135"]=2 ["c136"]=2 )
     nthreads=${nthreads:-1}
     ycsb_dir=$TASIR_SRCDIR/misc/YCSB-C
 
@@ -190,7 +213,7 @@ ycsb() {
 cyclades() {
     # first host is root
     declare -a host_list=( c15 c12 c101 c102 c103 c104 c105 c106 c107 c108 c109 c110 c111 c112 c113 c114 c115 c116 c121 c122 c123 c124 c125 c126 c127 c128 c129 c130 c131 c132 c133 c134 c135 c136 )
-    declare -A host_nthreads=( ["c12"]=2 ["c13"]=2 ["c15"]=2 ["c101"]=2 ["c121"]=2 ["c103"]=2 ["c104"]=2 ["c105"]=2 ["c106"]=2 ["c107"]=2 ["c108"]=2 ["c109"]=2 ["c110"]=2 ["c111"]=2 ["c112"]=2 ["c113"]=2 ["c114"]=2 ["c115"]=2 ["c116"]=2 ["c121"]=2 ["c122"]=2 ["c123"]=2 ["c124"]=2 ["c125"]=2 ["c126"]=2 ["c127"]=2 ["c128"]=2 ["c129"]=2 ["c130"]=2 ["c131"]=2 ["c132"]=2 ["c133"]=2 ["c134"]=2 ["c135"]=2 ["c136"]=2 )
+    declare -A host_nthreads=( ["c12"]=2 ["c13"]=2 ["c15"]=2 ["c101"]=2 ["c102"]=2 ["c103"]=2 ["c104"]=2 ["c105"]=2 ["c106"]=2 ["c107"]=2 ["c108"]=2 ["c109"]=2 ["c110"]=2 ["c111"]=2 ["c112"]=2 ["c113"]=2 ["c114"]=2 ["c115"]=2 ["c116"]=2 ["c121"]=2 ["c122"]=2 ["c123"]=2 ["c124"]=2 ["c125"]=2 ["c126"]=2 ["c127"]=2 ["c128"]=2 ["c129"]=2 ["c130"]=2 ["c131"]=2 ["c132"]=2 ["c133"]=2 ["c134"]=2 ["c135"]=2 ["c136"]=2 )
     nthreads=${nthreads:-1}
 
     model=${model:-matrix_completion}

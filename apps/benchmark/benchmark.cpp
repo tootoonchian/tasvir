@@ -67,6 +67,7 @@ uint64_t experiment(tasvir_area_desc *d, size_t len, int count, int iter, int st
 
     flush_cache();
     tasvir_sync_stats_reset();
+    memset(tasvir_data2log(d->h), 0, len >> TASVIR_SHIFT_BYTE);
     time_us = gettime_us();
     int i;
     while (count > 0) {
@@ -77,12 +78,14 @@ uint64_t experiment(tasvir_area_desc *d, size_t len, int count, int iter, int st
         if (do_service)
             tasvir_service();
     }
+
     return (gettime_us() - time_us) / 1000;
 }
 
 int main(int argc, char **argv) {
-    if (argc != 6) {
-        fprintf(stderr, "usage: %s core nr_updates nr_updates_per_service area_bytes stride\n", argv[0]);
+    if (argc != 8) {
+        fprintf(stderr, "usage: %s core nr_updates nr_updates_per_service area_bytes stride sync_int sync_ext\n",
+                argv[0]);
         return -1;
     }
     int core = atoi(argv[1]);
@@ -90,6 +93,8 @@ int main(int argc, char **argv) {
     int iter = atoi(argv[3]);
     size_t area_len = atol(argv[4]);
     int stride = atoi(argv[5]);
+    int sync_int = atoi(argv[6]);
+    int sync_ext = atoi(argv[7]);
 
     init();
 
@@ -104,8 +109,8 @@ int main(int argc, char **argv) {
     param.owner = NULL;
     param.type = TASVIR_AREA_TYPE_APP;
     param.len = area_len;
-    param.sync_int_us = 10000;
-    param.sync_ext_us = 100000;
+    param.sync_int_us = sync_int;  // 10000;
+    param.sync_ext_us = sync_ext;  // 100000;
     snprintf(param.name, sizeof(param.name), "benchmark-%04x", static_cast<uint16_t>(xorshift128plus()));
     tasvir_area_desc *d = tasvir_new(param);
     if (!d) {

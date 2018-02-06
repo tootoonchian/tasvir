@@ -831,6 +831,8 @@ static inline void tasvir_kill_thread(tasvir_thread *t) {
     tdata->state = TASVIR_THREAD_STATE_DEAD;
     rte_ring_free(tdata->ring_rx);
     rte_ring_free(tdata->ring_tx);
+    tdata->ring_rx = NULL;
+    tdata->ring_tx = NULL;
 
     /* change ownership */
     tasvir_kill_thread_ownership(t, ttld.root_desc);
@@ -1136,7 +1138,7 @@ tasvir_area_desc *tasvir_attach(tasvir_area_desc *pd, const char *name, tasvir_n
     if (!(d && d->active && d->h && d->owner))
         return NULL;
 
-    if (!d->h->active && !tasvir_is_local(d))
+    if ((!d->h->active || d == ttld.root_desc) && !tasvir_is_local(d))
         tasvir_attach_helper(d, node ? node : ttld.node);
 
     if (!d->h->active)
@@ -1416,7 +1418,7 @@ static inline int tasvir_service_msg(tasvir_msg *m, tasvir_msg_src src) {
         } else
             r = ttld.ndata->tdata[ttld.thread ? ttld.thread->tid.idx : TASVIR_THREAD_DAEMON_IDX].ring_tx;
 
-        if (rte_ring_sp_enqueue(r, m) != 0) {
+        if (r && rte_ring_sp_enqueue(r, m) != 0) {
             LOG_DBG("rte_ring_sp_enqueue to ring %p failed", (void *)r);
             rte_mempool_put(ttld.ndata->mp, (void *)m);
             return -1;
