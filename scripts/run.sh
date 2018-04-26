@@ -1,20 +1,35 @@
 #!/bin/bash
-RUNSCRIPT=$(realpath $0)
+RUNSCRIPT=$(realpath ${BASH_SOURCE[0]})
+SCRIPTDIR=$(dirname $RUNSCRIPT)
+LOGDIR=$SCRIPTDIR/log
 TASVIR_SRCDIR=$(realpath `dirname $RUNSCRIPT`/..)
+TASVIR_CONFDIR=$TASVIR_SRCDIR/etc
+TASVIR_CONF=$TASVIR_CONFDIR/tasvir.conf
 TASVIR_BINDIR=$TASVIR_SRCDIR/build/bin
 PIDFILE_PREFIX=/var/run/tasvir-
 
-declare -A HOST_NIC=( ["c12"]="87:00.0" ["c13"]="83:00.0" ["c15"]="87:00.0" ["c101"]="05:00.0" ["c102"]="05:00.0" ["c103"]="05:00.0" ["c104"]="05:00.0" ["c105"]="05:00.0" ["c106"]="05:00.0" ["c107"]="05:00.0" ["c108"]="05:00.0" ["c109"]="05:00.0" ["c110"]="05:00.0" ["c111"]="05:00.0" ["c112"]="05:00.0" ["c113"]="05:00.0" ["c114"]="05:00.0" ["c115"]="05:00.0" ["c116"]="05:00.0" ["c121"]="05:00.0" ["c122"]="05:00.0" ["c123"]="05:00.0" ["c124"]="05:00.0" ["c125"]="05:00.0" ["c126"]="05:00.0" ["c127"]="05:00.0" ["c128"]="05:00.0" ["c129"]="05:00.0" ["c130"]="05:00.0" ["c131"]="05:00.0" ["c132"]="05:00.0" ["c133"]="05:00.0" ["c134"]="05:00.0" ["c135"]="0a:00.0" ["c136"]="0a:00.0" )
-declare -A HOST_NCORES=( ["c12"]=24 ["c13"]=24 ["c15"]=36 ["c101"]=16 ["c102"]=16 ["c103"]=16 ["c104"]=16 ["c105"]=16 ["c106"]=16 ["c107"]=16 ["c108"]=16 ["c109"]=16 ["c110"]=16 ["c111"]=16 ["c112"]=16 ["c113"]=16 ["c114"]=16 ["c115"]=16 ["c116"]=16 ["c121"]=16 ["c122"]=16 ["c123"]=16 ["c124"]=16 ["c125"]=16 ["c126"]=16 ["c127"]=16 ["c128"]=16 ["c129"]=16 ["c130"]=16 ["c131"]=16 ["c132"]=16 ["c133"]=16 ["c134"]=16 ["c135"]=16 ["c136"]=16 )
-# root must come first
-declare -a HOST_ALL=(c15 c12 c13 c101 c102 c103 c104 c105 c106 c107 c108 c109 c110 c111 c112 c113 c114 c115 c116 c121 c122 c123 c124 c125 c126 c127 c128 c129 c130 c131 c132 c133 c134 c135 c136)
+declare -A HOST_NIC
+declare -A HOST_NCORES
+
+__init__() {
+    while read host ncores netdev; do
+        HOST_NIC[$host]=$netdev
+        HOST_NCORES[$host]=$ncores
+    done <<< $(grep -v '^#' $TASVIR_CONF | grep .)
+}
 
 prepare() {
     echo never >/sys/kernel/mm/transparent_hugepage/enabled
     sysctl vm.nr_hugepages=1050 &>/dev/null
 
     modprobe igb_uio &>/dev/null
-    $RTE_SDK/usertools/dpdk-devbind.py --force -b igb_uio ${HOST_NIC[$HOSTNAME]} &>/dev/null
+    if [[ ${HOST_NIC[$HOSTNAME]} = *"bonding="*  ]]; then
+        echo ${HOST_NIC[$HOSTNAME]} | sed 's/slave=/\n/g' | sed 's/,.*//g' | grep ^0000: | while read i; do
+            $RTE_SDK/usertools/dpdk-devbind.py --force -b igb_uio $i &>/dev/null
+        done
+    else
+        $RTE_SDK/usertools/dpdk-devbind.py --force -b igb_uio ${HOST_NIC[$HOSTNAME]} &>/dev/null
+    fi
 
     for pidfile in ${PIDFILE_PREFIX}*; do
         start-stop-daemon --stop --retry 3 --remove-pidfile --pidfile $pidfile &>/dev/null
@@ -46,11 +61,14 @@ prepare() {
     done &>/dev/null
     # disable uncore frequency scaling
     wrmsr -a 0x620 0x1d1d
+    date > /tmp/prepare.done
+    pkill -f "tail -f.*log"
+    mkdir $LOGDIR &>/dev/null
 }
 
 compile() {
-    export CC=$(which clang)
-    export CXX=$(which clang++)
+    #export CC=$(which clang)
+    #export CXX=$(which clang++)
 
     mkdir $TASVIR_SRCDIR/build &>/dev/null
     cd $TASVIR_SRCDIR/build
@@ -60,34 +78,30 @@ compile() {
 
 generate_cmd() {
     generate_cmd_thread() {
-        local bgflag
-        local pmucmd
         local gdbcmd
-        local pmucmd="/opt/tools/pmu-tools/toplev.py -l4 -S"
-        local stdbufcmd="stdbuf -o 0 -e 0"
         local redirect
         if [ $tid == d -o $tid == 0 ]; then
             #gdbcmd="gdb -ex run --args"
             redirect="2>&1 | tee $logfile"
         else
-            bgflag="--background"
             redirect=">$logfile 2>&1"
         fi
-        bgflag=""
         #gdbcmd="gdb -ex run --args"
-        redirect="2>&1 | tee $logfile"
+        #redirect="2>&1 | tee $logfile"
+        redirect=">$logfile 2>&1"
 
-        cmd_thread="start-stop-daemon $bgflag --start --make-pidfile --pidfile ${PIDFILE_PREFIX}%TID%.pid --startas /bin/bash -- -c
-                    \"exec /usr/bin/numactl -C %CORE% $gdbcmd $stdbufcmd $* $redirect\""
+        cmd_thread="start-stop-daemon --background --start --make-pidfile --pidfile ${PIDFILE_PREFIX}%TID%.pid --startas /bin/bash -- -c
+                    \"exec /usr/bin/numactl -C %CORE% $gdbcmd stdbuf -o 0 -e 0 $* $redirect\";"
+        cmd_thread+="sleep 1; stdbuf -o 0 -e 0 tail -f $logfile"
         cmd_thread=$(echo $cmd_thread | sed -e s/%CORE%/$core/g -e s/%TID%/$tid/g -e s/%NTHREADS%/$nthreads/g -e s/%HOST%/$host/g)
         ((core--))
     }
 
     local nthreads=${nthreads:-1}
-    local delay=${delay:-2}
+    local delay=${delay:-3}
 
     local host_counter=0
-    local host_list=("${host_list[@]:-${HOST_ALL[@]}}")
+    local host_list=("${host_list[@]:-${!HOST_NCORES[@]}}")
     local host=${host_list[0]}
 
     local cmd
@@ -96,9 +110,10 @@ generate_cmd() {
     local cmd_thread
     local session=tasvir_run
     local w=-1
+    local p=0
     local timestamp=`date +"%Y%m%d-%H%M%S"`
     local window
-    local logdir="$(dirname $RUNSCRIPT)/log/$timestamp"
+    local logdir="$LOGDIR/$timestamp"
     local manifest="$logdir/manifest"
     local logfile="$logdir/t%TID%.%HOST%"
     local threads_this=0
@@ -118,13 +133,14 @@ generate_cmd() {
 
     for tid in `seq 0 $((nthreads - 1))`; do
         [ $tid -ne 0 -a $((tid % 16)) -eq 0 ] && cmd+="; $cmd_byobu "
-        if [ $threads_this -eq "${host_nthreads[$host]}" ]; then
+        if [ $threads_this -eq "${host_nthreads[$host_counter]}" ]; then
             ((host_counter++))
             host=${host_list[$host_counter]}
             threads_this=0
         fi
         if [ $threads_this -eq 0 ]; then
-            [ $tid -ne 0 ] && cmd+="select-layout "$([ $w -le 1 ] && echo main-horizontal || echo tiled)"\; "
+            [ $tid -ne 0 ] && cmd+="select-layout "$([ $w -le 0 ] && echo main-horizontal || echo tiled)"\; "
+            cmd+="select-layout tiled\; "
             # run the daemon
             local pciaddr=${HOST_NIC[$host]}
             local core=$((HOST_NCORES[$host] - 1))
@@ -133,112 +149,42 @@ generate_cmd() {
             tid=d
             cmd_ssh=$([ $HOSTNAME != "$host" ] && echo "ssh -t $host")
             w=-1
+            p=1
             window=$host-n$nthreads-$timestamp-$((++w))
             generate_cmd_thread $cmd_daemon
-            cmd+="new-window -t $session -n $window $cmd_ssh '. $RUNSCRIPT; prepare; $cmd_thread; prepare;'\; "
+            cmd+="new-window -t $session -n $window $cmd_ssh '$cmd_thread'\; "
             cmd+="split-window -t $session:$window "
             tid=$tid2
             threads_this=1
-        elif [ $((threads_this % 4)) -eq 0 ]; then
-            cmd+="select-layout "$([ $w -eq 1 ] && echo main-horizontal || echo tiled)"\; "
+        elif [ $((p % 3)) -eq 0 -a $w -eq 0 ]; then
+            cmd+="select-layout main-horizontal\; "
             window=$host-$nthreads-$timestamp-$((++w))
             cmd+="new-window -t $session -n $window "
+            p=0
+        elif [ $((p % 4)) -eq 0 ]; then
+            cmd+="select-layout tiled\; "
+            window=$host-$nthreads-$timestamp-$((++w))
+            cmd+="new-window -t $session -n $window "
+            p=0
         else
             cmd+="split-window -t $session:$window "
         fi
 
         # run the worker
-        local cmd_last=  # ". $RUNSCRIPT; prepare;"
         generate_cmd_thread $cmd_app
-        cmd+="$cmd_ssh 'ulimit -c unlimited; sleep $delay; $cmd_thread; $cmd_last'\; "
+        ((p++))
+        cmd+="$cmd_ssh 'ulimit -c unlimited; sleep $delay; $cmd_thread'\; "
         ((threads_this++))
     done
 
     cmd+="select-layout "$([ $w -eq 0 ] && echo main-horizontal || echo tiled)"\; "
-    cmd+="new-window -t $session -n 0 'echo -e nthreads=$nthreads cmd_app=$cmd_app > $manifest' ;"
-    echo "$cmd"
-}
+    cmd+="split-window -t $session:$window 'echo -e nthreads=$nthreads cmd_app=$cmd_app > $manifest' ;"
 
-benchmark() {
-    nr_writes=${nr_writes:-$((50 * 1000 * 1000))}
-    writes_per_service=${writes_per_service:-100}
-    area_len=${area_len:-$((100 * 1024 * 1024))}
-    stride=${stride:-8}
-    sync_int=${sync_int:-10000}
-    sync_ext=${sync_ext:-100000}
-
-    # first host is root
-    declare -a host_list=( c15 c12 c13 c101 c102 c103 c104 c105 c106 c107 c108 c109 c110 c111 c112 c113 c114 c115 c116 c121 c122 c123 c124 c125 c126 c127 c128 c129 c130 c131 c132 c133 c134 c135 c136 )
-    declare -A host_nthreads=( ["c12"]=2 ["c13"]=2 ["c15"]=2 ["c101"]=2 ["c102"]=2 ["c103"]=2 ["c104"]=2 ["c105"]=2 ["c106"]=2 ["c107"]=2 ["c108"]=2 ["c109"]=2 ["c110"]=2 ["c111"]=2 ["c112"]=2 ["c113"]=2 ["c114"]=2 ["c115"]=2 ["c116"]=2 ["c121"]=2 ["c122"]=2 ["c123"]=2 ["c124"]=2 ["c125"]=2 ["c126"]=2 ["c127"]=2 ["c128"]=2 ["c129"]=2 ["c130"]=2 ["c131"]=2 ["c132"]=2 ["c133"]=2 ["c134"]=2 ["c135"]=2 ["c136"]=2 )
-    nthreads=${nthreads:-1}
-
-    eval $(generate_cmd $TASVIR_BINDIR/tasvir_benchmark %CORE% $nr_writes $writes_per_service $area_len $stride $sync_int $sync_ext)
-}
-
-monitor() {
-    # first host is root
-    declare -a host_list=( c13 c12 )
-    declare -A host_nthreads=( ["c13"]=3 ["c12"]=3 )
-    nthreads=${nthreads:-4}
-
-    eval $(generate_cmd $TASVIR_BINDIR/tasvir_monitor %TID% %CORE% %NTHREADS%)
-}
-
-tasvir_openflow() { ## should be run in local
-    declare -a host_list=( c13 )
-    declare -A host_nthreads=( ["c13"]=4 )
-    nthreads=${nthreads:-2}
-
-    eval $(generate_cmd $TASVIR_BINDIR/openflow %TID% %CORE% %NTHREADS%)
-}
-
-openflow() { ## should be run in local
-    declare -a host_list=( c13 )
-    declare -A host_nthreads=( ["c13"]=4 )
-    nthreads=${nthreads:-2}
-
-    eval $(generate_cmd $TASVIR_BINDIR/openflow %TID% %CORE% %NTHREADS%)
-}
-
-ycsb() {
-    # first host is root
-    declare -a host_list=( c15 c12 c101 c102 c103 c104 c105 c106 c107 c108 c109 c110 c111 c112 c113 c114 c115 c116 c121 c122 c123 c124 c125 c126 c127 c128 c129 c130 c131 c132 c133 c134 c135 c136 )
-    declare -A host_nthreads=( ["c12"]=2 ["c13"]=2 ["c15"]=2 ["c101"]=2 ["c102"]=2 ["c103"]=2 ["c104"]=2 ["c105"]=2 ["c106"]=2 ["c107"]=2 ["c108"]=2 ["c109"]=2 ["c110"]=2 ["c111"]=2 ["c112"]=2 ["c113"]=2 ["c114"]=2 ["c115"]=2 ["c116"]=2 ["c121"]=2 ["c122"]=2 ["c123"]=2 ["c124"]=2 ["c125"]=2 ["c126"]=2 ["c127"]=2 ["c128"]=2 ["c129"]=2 ["c130"]=2 ["c131"]=2 ["c132"]=2 ["c133"]=2 ["c134"]=2 ["c135"]=2 ["c136"]=2 )
-    nthreads=${nthreads:-1}
-    ycsb_dir=$TASIR_SRCDIR/misc/YCSB-C
-
-    eval $(generate_cmd $TASVIR_BINDIR/kvstore -s %TID% -n 2 -c %CORE% -a $ycsb_dir/wtest-2.access -l $ycsb_dir/wtest-2.load)
-}
-
-cyclades() {
-    # first host is root
-    declare -a host_list=( c15 c12 c101 c102 c103 c104 c105 c106 c107 c108 c109 c110 c111 c112 c113 c114 c115 c116 c121 c122 c123 c124 c125 c126 c127 c128 c129 c130 c131 c132 c133 c134 c135 c136 )
-    declare -A host_nthreads=( ["c12"]=2 ["c13"]=2 ["c15"]=2 ["c101"]=2 ["c102"]=2 ["c103"]=2 ["c104"]=2 ["c105"]=2 ["c106"]=2 ["c107"]=2 ["c108"]=2 ["c109"]=2 ["c110"]=2 ["c111"]=2 ["c112"]=2 ["c113"]=2 ["c114"]=2 ["c115"]=2 ["c116"]=2 ["c121"]=2 ["c122"]=2 ["c123"]=2 ["c124"]=2 ["c125"]=2 ["c126"]=2 ["c127"]=2 ["c128"]=2 ["c129"]=2 ["c130"]=2 ["c131"]=2 ["c132"]=2 ["c133"]=2 ["c134"]=2 ["c135"]=2 ["c136"]=2 )
-    nthreads=${nthreads:-1}
-
-    model=${model:-matrix_completion}
-    #model=${model:-least_squares}
-    #model=${model:-word_embeddings}
-    #model=${model:-matrix_inverse}
-    updater=${updater:-sparse_sgd}
-    #updater=${updater:-saga}
-    trainer=${trainer:-cyclades_trainer}
-    nepochs=${nepoch:-11}
-    batch=${batch:-2000}
-    #batch=${batch:-4250}
-    #batch=${batch:-1000}
-    dataset=${dataset:-$TASVIR_SRCDIR/apps/cyclades/data/movielens/ml-1m/movielens_1m.data}
-    #dataset=${dataset:-$TASVIR_SRCDIR/apps/cyclades/data/word_embeddings/w2v_graph}
-    #dataset=${dataset:-$TASVIR_SRCDIR/apps/cyclades/data/nh2010/nh2010/nh2010.data}
-    learning_rate=${learning_rate:-2e-2}
-    #learning_rate=${learning_rate:-1e-10}
-    #learning_rate=${learning_rate:-3e-14}
-
-    [ ! -z "$model" ] && model=--$model
-    [ ! -z "$updater" ] && updater=--$updater
-    [ ! -z "$trainer" ] && trainer=--$trainer
-
-    eval $(generate_cmd $TASVIR_BINDIR/tasvir_cyclades --wid %TID% --core %CORE% --print_loss_per_epoch --print_partition_time --n_threads=%NTHREADS% --learning_rate=$learning_rate $model $updater $trainer --cyclades_batch_size=$batch --n_epochs=$nepochs --data_file=$dataset)
+    cmd_prepare=
+    for h in `seq 0 $host_counter`; do
+        cmd_prepare+="ssh -t ${host_list[$h]} $RUNSCRIPT prepare; "
+    done
+    echo "$cmd_prepare $cmd"
 }
 
 setup_env() {
@@ -247,9 +193,8 @@ setup_env() {
     dpkg-reconfigure -f noninteractive tzdata
 
     # Upgrade
-    # sed -i -e s/jessie/testing/g -e s/stretch/testing/g /etc/apt/sources.list
     apt-get update
-    apt-get -y dist-upgrade
+    apt-get -y upgrade
 
     # Packages
     apt-get install -y \
@@ -263,8 +208,8 @@ EOF
     service procps restart
     cat >/etc/profile.d/dpdk.sh <<EOF
 export RTE_ARCH=x86_64
-export RTE_SDK=/opt/resq/nf/dpdk-v17.05
-export RTE_TARGET=resq
+export RTE_SDK=/opt/resq/nf/dpdk-v18.02
+export RTE_TARGET=tasvir
 EOF
     chmod +x /etc/profile.d/dpdk.sh
 
@@ -283,4 +228,27 @@ EOF
     YCM_CORES=1 python3 ./install.py --clang-completer --system-libclang
 }
 
-[ $# == 1 ] && $1
+run_proxy() {
+    type -t $1 | grep -q function
+    if [ $? -eq 0 ]; then
+        $1
+    else
+        for f in $TASVIR_CONFDIR/run*.conf; do
+            . $f
+        done
+        varname=$1_cmd
+        varname_hl=$1_host_list
+        varname_hn=$1_host_nthreads
+        varname_nt=$1_nthreads
+        host_list=${host_list:-${!varname_hl}}
+        host_nthreads=${host_nthreads:-${!varname_hn}}
+        nthreads=${nthreads:-${!varname_nt}}
+        cmd=$(eval echo ${!varname})
+        eval $(generate_cmd $cmd)
+    fi
+}
+
+__init__
+if [ $# == 1 ]; then
+    run_proxy $1
+fi

@@ -71,7 +71,6 @@ struct tasvir_local_ndata { /* node data */
     uint64_t tsc_hz;
     struct rte_mempool *mp;
     atomic_int barrier_entry;
-    atomic_int barrier_exit;
     pthread_mutex_t mutex_boot;
     struct rte_ring *ring_ext_tx;
 
@@ -142,6 +141,14 @@ _Static_assert(sizeof(tasvir_local_ndata) <= TASVIR_SIZE_LOCAL,
                 ttld.ndata ? ttld.ndata->time_us / 1000. : 0, __func__, ##__VA_ARGS__); \
     }
 
+#ifdef __AVX512F__
+#define TASVIR_VEC_UNIT 64
+#elif __AVX2__
+#define TASVIR_VEC_UNIT 32
+#else
+#error Tasvir requires AVX2 or AVX512 support
+#endif
+
 #ifndef TASVIR_LOG_LEVEL
 #define TASVIR_LOG_LEVEL 7
 #endif
@@ -205,26 +212,39 @@ static inline size_t tasvir_sync_area_external_boot(tasvir_area_desc *d, bool bo
 
 #define R &((uint8_t *)v)[0]
 #define X(i) &((uint8_t *)v)[o[i]]
-static void rpc_tasvir_attach_helper(void *v, ptrdiff_t *o) {
+static bool rpc_tasvir_attach_helper(void *v, ptrdiff_t *o) {
     *(int *)R = tasvir_attach_helper(*(tasvir_area_desc **)X(0), *(tasvir_node **)X(1));
+    return *(int *)R == 0;
 }
 
-static void rpc_tasvir_delete(void *v, ptrdiff_t *o) { *(int *)R = tasvir_delete(*(tasvir_area_desc **)X(0)); }
+static bool rpc_tasvir_delete(void *v, ptrdiff_t *o) {
+    *(int *)R = tasvir_delete(*(tasvir_area_desc **)X(0));
+    return *(int *)R == 0;
+}
 
-static void rpc_tasvir_init_thread(void *v, ptrdiff_t *o) {
+static bool rpc_tasvir_init_thread(void *v, ptrdiff_t *o) {
     *(tasvir_thread **)R = tasvir_init_thread(*(pid_t *)X(0), *(uint16_t *)X(1), *(uint8_t *)X(2));
+    return *(tasvir_thread **)R != NULL;
 }
 
-static void rpc_tasvir_init_finish(void *v, ptrdiff_t *o) { *(bool *)R = tasvir_init_finish(*(tasvir_thread **)X(0)); }
+static bool rpc_tasvir_init_finish(void *v, ptrdiff_t *o) {
+    *(bool *)R = tasvir_init_finish(*(tasvir_thread **)X(0));
+    return *(bool *)R;
+}
 
-static void rpc_tasvir_new(void *v, ptrdiff_t *o) { *(tasvir_area_desc **)R = tasvir_new(*(tasvir_area_desc *)X(0)); }
+static bool rpc_tasvir_new(void *v, ptrdiff_t *o) {
+    *(tasvir_area_desc **)R = tasvir_new(*(tasvir_area_desc *)X(0));
+    return *(tasvir_area_desc **)R != NULL;
+}
 
-static void rpc_tasvir_sync_area_external_boot(void *v, ptrdiff_t *o) {
+static bool rpc_tasvir_sync_area_external_boot(void *v, ptrdiff_t *o) {
     *(size_t *)R = tasvir_sync_area_external_boot(*(tasvir_area_desc **)X(0), *(bool *)X(1));
+    return *(size_t *)R > 0;
 }
 
-static void rpc_tasvir_update_owner(void *v, ptrdiff_t *o) {
+static bool rpc_tasvir_update_owner(void *v, ptrdiff_t *o) {
     *(bool *)R = tasvir_update_owner(*(tasvir_area_desc **)X(0), *(tasvir_thread **)X(1));
+    return *(bool *)R;
 }
 #undef R
 #undef X
@@ -295,23 +315,18 @@ static inline void tasvir_tid2str(tasvir_tid tid, size_t buf_size, char *buf) {
     snprintf(&buf[strlen(buf)], buf_size - strlen(buf), ":%d", tid.idx);
 }
 
-static inline void tasvir_mov32_stream(void *dst, const void *src) {
-    __m256i m = _mm256_stream_load_si256((const __m256i *)src);
-    _mm256_stream_si256((__m256i *)dst, m);
-}
-
-__attribute__((unused)) static inline void tasvir_mov64_stream(void *dst, const void *src) {
-    tasvir_mov32_stream(dst, src);
-    tasvir_mov32_stream((uint8_t *)dst + 32, (uint8_t *)src + 32);
-}
-
-static inline void tasvir_mov32blocks_stream(void *dst, const void *src, size_t len) {
+static inline void tasvir_mov_blocks_stream(void *dst, const void *src, size_t len) {
     while (len > 0) {
-        tasvir_mov32_stream(dst, src);
-        /* rte_mov32(dst, src); */
-        len -= 32;
-        dst = (uint8_t *)dst + 32;
-        src = (uint8_t *)src + 32;
+#if TASVIR_VEC_UNIT == 64
+        __m512i m = _mm512_stream_load_si512((const __m512i *)src);
+        _mm512_stream_si512((__m512i *)dst, m);
+#else
+        __m256i m = _mm256_stream_load_si256((const __m256i *)src);
+        _mm256_stream_si256((__m256i *)dst, m);
+#endif
+        len -= TASVIR_VEC_UNIT;
+        dst = (uint8_t *)dst + TASVIR_VEC_UNIT;
+        src = (uint8_t *)src + TASVIR_VEC_UNIT;
     }
 }
 
@@ -498,8 +513,13 @@ static inline int tasvir_init_dpdk(uint16_t core, char *pciaddr) {
     argv[argc++] = "--proc-type";
     argv[argc++] = ttld.is_daemon ? "primary" : "secondary";
     if (pciaddr) {
-        argv[argc++] = "--pci-whitelist";
-        argv[argc++] = pciaddr;
+        if (strncmp("net_bonding", pciaddr, 11) == 0) {
+            argv[argc++] = "--vdev";
+            argv[argc++] = pciaddr;
+        } else {
+            argv[argc++] = "--pci-whitelist";
+            argv[argc++] = pciaddr;
+        }
     }
     retval = rte_eal_init(argc, argv);
     if (retval < 0) {
@@ -510,15 +530,27 @@ static inline int tasvir_init_dpdk(uint16_t core, char *pciaddr) {
 }
 
 static int tasvir_init_port(char *pciaddr) {
+    tasvir_str port_name;
     if (!ttld.is_daemon || !pciaddr)
         return 0;
 
     int nb_ports = rte_eth_dev_count();
-    if (nb_ports != 1) {
-        LOG_ERR("rte_eth_dev_count() != 1");
+    if (nb_ports == 0) {
+        LOG_ERR("rte_eth_dev_count() == 0");
         return -1;
     }
-    ttld.ndata->port_id = 0;
+
+    strncpy(port_name, pciaddr, sizeof(port_name));
+    if (strncmp("net_bonding", pciaddr, 11) == 0) {
+        char *s = strchr(port_name, ',');
+        if (s)
+            *s = '\0';
+    }
+
+    if (rte_eth_dev_get_port_by_name(port_name, &ttld.ndata->port_id) != 0) {
+        LOG_ERR("rte_eth_dev_get_port_by_name() failed, name=%s", port_name);
+        return -1;
+    }
     rte_eth_macaddr_get(ttld.ndata->port_id, &ttld.ndata->mac_addr);
     ether_addr_copy(&ttld.ndata->mac_addr, &ttld.ndata->nodecast_tid.nid.mac_addr);
 
@@ -577,7 +609,7 @@ static int tasvir_init_port(char *pciaddr) {
     retval = rte_eth_dev_set_link_up(ttld.ndata->port_id);
     if (retval < 0) {
         LOG_ERR("rte_eth_dev_set_link_up: err=%d, port=%u", retval, ttld.ndata->port_id);
-        return -1;
+        // return -1;
     }
 
     end_time_us = tasvir_gettime_us() + 3 * S2US;
@@ -632,11 +664,10 @@ static int tasvir_init_local() {
         pthread_mutex_init(&ttld.ndata->mutex_boot, &mutex_attr);
         pthread_mutexattr_destroy(&mutex_attr);
         atomic_store(&ttld.ndata->barrier_entry, -1);
-        atomic_store(&ttld.ndata->barrier_exit, -1);
 
         /* mempool */
         ttld.ndata->mp =
-            rte_pktmbuf_pool_create("mempool", 16 * 1024 - 1, 512, 0, RTE_MBUF_DEFAULT_BUF_SIZE, rte_socket_id());
+            rte_pktmbuf_pool_create("mempool", 128 * 1024 - 1, 512, 0, RTE_MBUF_DEFAULT_BUF_SIZE, rte_socket_id());
         if (!ttld.ndata->mp) {
             LOG_ERR("failed to create pkt mempool");
             return -1;
@@ -868,6 +899,7 @@ static inline bool tasvir_init_finish(tasvir_thread *t) {
         }
     } else {
         bool retval;
+        // FIXME: retval
         if (!tasvir_rpc_wait(S2US, (void **)&retval, ttld.node_desc, &rpc_tasvir_init_finish, t) || !retval) {
             return false;
         }
@@ -880,7 +912,7 @@ static inline bool tasvir_init_finish(tasvir_thread *t) {
     return true;
 }
 
-tasvir_area_desc *tasvir_init(uint8_t type, uint16_t core, char *pciaddr) {
+tasvir_area_desc *tasvir_init(tasvir_thread_type type, uint16_t core, char *pciaddr) {
     assert(!ttld.node && !ttld.thread);
 
     memset(&ttld, 0, sizeof(tasvir_tls_data));
@@ -1090,15 +1122,16 @@ static inline int tasvir_attach_helper(tasvir_area_desc *d, tasvir_node *node) {
             d->h->users[d->h->nr_users].node = node;
             d->h->users[d->h->nr_users].version = 0;
             d->h->nr_users++;
-            tasvir_log_write(&d->h->users[d->h->nr_users], sizeof(tasvir_area_user));
+            tasvir_log_write(&d->h->nr_users, sizeof(d->h->nr_users));
+            tasvir_log_write(&d->h->users[d->h->nr_users], sizeof(d->h->users[d->h->nr_users]));
         }
 
         if (ttld.is_daemon) {
             tasvir_sync_area_external_boot(d, true);
         } else {
-            tasvir_rpc_status *s = tasvir_rpc(ttld.node_desc, &rpc_tasvir_sync_area_external_boot, d, true);
-            if (s)
-                s->do_free = true;
+            tasvir_rpc_status *rs = tasvir_rpc(ttld.node_desc, &rpc_tasvir_sync_area_external_boot, d, true);
+            if (rs)
+                rs->do_free = true;
         }
 
         /* FIXME: hack to distribute node and thread info at boot time */
@@ -1320,7 +1353,7 @@ bool tasvir_rpc_wait(uint64_t timeout_us, void **retval, tasvir_area_desc *d, ta
         tasvir_service();
     }
 
-    if (!done) {
+    if (failed || !done) {
         if (rs->response)
             rte_mempool_put(ttld.ndata->mp, (void *)rs->response);
         LOG_INFO("failed (status=%s h=%p update_us=%lu expected_us=%lu)", tasvir_rpc_status_type_str[rs->status],
@@ -1390,10 +1423,10 @@ static void tasvir_service_msg_rpc_response(tasvir_msg_rpc *m) {
 static inline void tasvir_service_msg_mem(tasvir_msg_mem *m) {
     /* TODO: log_write and sync */
     tasvir_log_write(m->addr, m->len);
-    tasvir_mov32blocks_stream(tasvir_data2shadow(m->addr), m->line, m->len);
+    tasvir_mov_blocks_stream(tasvir_data2shadow(m->addr), m->line, m->len);
     /* write to both versions because no sync while booting non-root daemon */
     if (!ttld.thread || ttld.ndata->tdata[TASVIR_THREAD_DAEMON_IDX].state == TASVIR_THREAD_STATE_BOOTING)
-        tasvir_mov32blocks_stream(m->addr, m->line, m->len);
+        tasvir_mov_blocks_stream(m->addr, m->line, m->len);
     rte_mempool_put(ttld.ndata->mp, (void *)m);
 }
 
@@ -1559,7 +1592,7 @@ tasvir_sync_job_run_helper(uint8_t *src, tasvir_log_t *log_internal, size_t len,
                 size_t tmp = (nbits0 + nbits1) << TASVIR_SHIFT_BIT;
                 /* copy over for a previous batch of 1s */
                 if (nbits1 > 0)
-                    tasvir_mov32blocks_stream(dst, src, nbits1 << TASVIR_SHIFT_BIT);
+                    tasvir_mov_blocks_stream(dst, src, nbits1 << TASVIR_SHIFT_BIT);
                 src += tmp;
                 dst += tmp;
                 nbits0 = nbits1 = 0;
@@ -1587,7 +1620,7 @@ tasvir_sync_job_run_helper(uint8_t *src, tasvir_log_t *log_internal, size_t len,
     }
 
     if (nbits1 > 0) {
-        tasvir_mov32blocks_stream(dst, src, nbits1 << TASVIR_SHIFT_BIT);
+        tasvir_mov_blocks_stream(dst, src, nbits1 << TASVIR_SHIFT_BIT);
     }
 
     return nbits1_seen << TASVIR_SHIFT_BIT;
@@ -1656,7 +1689,6 @@ static inline void tasvir_service_sync_prepare() {
     }
 
     atomic_store(&ttld.ndata->barrier_entry, nr_threads);
-    atomic_store(&ttld.ndata->barrier_exit, nr_threads);
 
     ttld.ndata->nr_jobs = 0;
     tasvir_walk_areas(ttld.root_desc, &tasvir_schedule_sync);
@@ -1722,7 +1754,7 @@ static inline void tasvir_msg_mem_generate(void *addr, size_t len, bool is_rw) {
         m[i]->len = MIN(TASVIR_CACHELINE_BYTES * TASVIR_NR_CACHELINES_PER_MSG, len);
         m[i]->h.mbuf.pkt_len = m[i]->h.mbuf.data_len =
             m[i]->len + offsetof(tasvir_msg_mem, line) - offsetof(tasvir_msg, eh);
-        tasvir_mov32blocks_stream(m[i]->line, is_rw ? tasvir_data2shadow(addr) : addr, m[i]->len);
+        tasvir_mov_blocks_stream(m[i]->line, is_rw ? tasvir_data2shadow(addr) : addr, m[i]->len);
 
         addr = (uint8_t *)addr + m[i]->len;
         len -= m[i]->len;

@@ -25,9 +25,6 @@ set(TASVIR_COMPILE_OPTIONS
 include_directories(./include $ENV{RTE_SDK}/$ENV{RTE_TARGET}/include)
 link_directories($ENV{RTE_SDK}/$ENV{RTE_TARGET}/lib ${CMAKE_LIBRARY_OUTPUT_DIRECTORY})
 
-## for LLVM pass
-find_package(LLVM REQUIRED CONFIG)
-
 ## TODO: add DPDK dependency check
 
 file(GLOB tasvir_src src/tasvir*.c)
@@ -35,12 +32,6 @@ add_library(tasvir STATIC ${tasvir_src})
 set_target_properties(tasvir PROPERTIES C_STANDARD 11 CXX_STANDARD 11 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
 target_link_libraries(tasvir uuid dl m rt pthread "-Wl,--whole-archive -ldpdk -Wl,--no-whole-archive")
 target_compile_options(tasvir PUBLIC ${TASVIR_COMPILE_OPTIONS})
-
-add_library(tasvir_pass MODULE src/llvm_pass.cpp)
-set_target_properties(tasvir_pass PROPERTIES C_STANDARD 11 CXX_STANDARD 11 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
-target_compile_definitions(tasvir_pass PUBLIC ${LLVM_DEFINITIONS})
-target_compile_options(tasvir_pass PUBLIC ${TASVIR_COMPILE_OPTIONS})
-target_include_directories(tasvir_pass PUBLIC ${LLVM_INCLUDE_DIRS})
 
 macro(add_tasvir_exec target)
     add_executable(${target} ${ARGN})
@@ -51,17 +42,26 @@ macro(add_tasvir_exec target)
     target_link_libraries(${target} tasvir rt numa)
 endmacro(add_tasvir_exec)
 
-macro(add_tasvir_instrumented_exec target)
-    add_executable(${target} ${ARGN})
-    add_dependencies(${target} tasvir tasvir_pass)
+## for LLVM pass
+#find_package(LLVM REQUIRED CONFIG)
+
+#add_library(tasvir_pass MODULE src/llvm_pass.cpp)
+#set_target_properties(tasvir_pass PROPERTIES C_STANDARD 11 CXX_STANDARD 11 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+#target_compile_definitions(tasvir_pass PUBLIC ${LLVM_DEFINITIONS})
+#target_compile_options(tasvir_pass PUBLIC ${TASVIR_COMPILE_OPTIONS})
+#target_include_directories(tasvir_pass PUBLIC ${LLVM_INCLUDE_DIRS})
+
+#macro(add_tasvir_instrumented_exec target)
+#    add_executable(${target} ${ARGN})
+#    add_dependencies(${target} tasvir tasvir_pass)
 
     #set_source_files_properties(${ARGN} PROPERTIES OBJECT_DEPENDS tasvir_pass)
     # using set_target_properties so that duplicate Xclangs don't get removed
-    set_target_properties(${target} PROPERTIES COMPILE_FLAGS "-Xclang -load -Xclang ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/libtasvir_pass.so"
-                                               C_STANDARD 11 CXX_STANDARD 11 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
-    target_compile_options(${target} PUBLIC ${TASVIR_COMPILE_OPTIONS})
-    target_link_libraries(${target} tasvir rt numa)
-endmacro(add_tasvir_instrumented_exec)
+#    set_target_properties(${target} PROPERTIES COMPILE_FLAGS "-Xclang -load -Xclang ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/libtasvir_pass.so"
+#                                               C_STANDARD 11 CXX_STANDARD 11 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+#    target_compile_options(${target} PUBLIC ${TASVIR_COMPILE_OPTIONS})
+#    target_link_libraries(${target} tasvir rt numa)
+#endmacro(add_tasvir_instrumented_exec)
 
 add_subdirectory(src)
 add_subdirectory(apps)
