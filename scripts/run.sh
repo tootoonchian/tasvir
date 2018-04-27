@@ -1,4 +1,5 @@
 #!/bin/bash
+
 RUNSCRIPT=$(realpath ${BASH_SOURCE[0]})
 SCRIPTDIR=$(dirname $RUNSCRIPT)
 LOGDIR=$SCRIPTDIR/log
@@ -7,16 +8,6 @@ TASVIR_CONFDIR=$TASVIR_SRCDIR/etc
 TASVIR_CONF=$TASVIR_CONFDIR/tasvir.conf
 TASVIR_BINDIR=$TASVIR_SRCDIR/build/bin
 PIDFILE_PREFIX=/var/run/tasvir-
-
-declare -A HOST_NIC
-declare -A HOST_NCORES
-
-__init__() {
-    while read host ncores netdev; do
-        HOST_NIC[$host]=$netdev
-        HOST_NCORES[$host]=$ncores
-    done <<< $(grep -v '^#' $TASVIR_CONF | grep .)
-}
 
 prepare() {
     echo never >/sys/kernel/mm/transparent_hugepage/enabled
@@ -236,19 +227,29 @@ run_proxy() {
         for f in $TASVIR_CONFDIR/run*.conf; do
             . $f
         done
-        varname=$1_cmd
-        varname_hl=$1_host_list
-        varname_hn=$1_host_nthreads
-        varname_nt=$1_nthreads
-        host_list=${host_list:-${!varname_hl}}
-        host_nthreads=${host_nthreads:-${!varname_hn}}
-        nthreads=${nthreads:-${!varname_nt}}
-        cmd=$(eval echo ${!varname})
+        local app_cmd=$1_cmd
+        local hl=$1_host_list[@]
+        local hn=$1_host_nthreads[@]
+        local nt=$1_nthreads
+        host_list=("${host_list[@]:-${!hl}}")
+        host_nthreads=("${host_nthreads[@]:-${!hn}}")
+        nthreads=${nthreads:-${!nt}}
+        cmd=$(eval echo ${!app_cmd})
         eval $(generate_cmd $cmd)
     fi
 }
 
-__init__
+declare -A HOST_NIC
+declare -A HOST_NCORES
+
+while read host ncores netdev; do
+    HOST_NIC[$host]=$netdev
+    HOST_NCORES[$host]=$ncores
+done <<< $(grep -v '^#' $TASVIR_CONF | grep .)
+
+IFS=' ' read -r -a host_list <<< "$host_list"
+IFS=' ' read -r -a host_nthreads <<< "$host_nthreads"
+
 if [ $# == 1 ]; then
     run_proxy $1
 fi
