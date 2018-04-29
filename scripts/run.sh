@@ -83,7 +83,7 @@ generate_cmd() {
 
         cmd_thread="start-stop-daemon --background --start --make-pidfile --pidfile ${PIDFILE_PREFIX}%TID%.pid --startas /bin/bash -- -c
                     \"exec /usr/bin/numactl -C %CORE% $gdbcmd stdbuf -o 0 -e 0 $* $redirect\";"
-        cmd_thread+="sleep 1; stdbuf -o 0 -e 0 tail -f $logfile"
+        cmd_thread+="sleep 1; stdbuf -o 0 -e 0 tail -n 1000 -f $logfile"
         cmd_thread=$(echo $cmd_thread | sed -e s/%CORE%/$core/g -e s/%TID%/$tid/g -e s/%NTHREADS%/$nthreads/g -e s/%HOST%/$host/g)
         ((core--))
     }

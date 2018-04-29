@@ -37,30 +37,29 @@ extern "C" {
 typedef uint64_t tasvir_log_t;
 typedef unsigned long tasvir_arg_promo_t;
 
-#define TASVIR_BARRIER_ENTER_US (200)    /**< Time (microseconds) to wait in the sync barrier */
-#define TASVIR_STAT_US (1 * 1000 * 1000) /**< Time (microseconds) between updating and printing average statistics */
-#define TASVIR_SYNC_INTERNAL_US (100 * 1000)  /**< Time (microseconds) between internal synchronization intervals */
-#define TASVIR_SYNC_EXTERNAL_US (500 * 1000)  /**< Time (microseconds) between external synchronization intervals */
+#define TASVIR_BARRIER_ENTER_US (10)        /**< Time (microseconds) to wait in the sync barrier */
+#define TASVIR_STAT_US (1 * 1000 * 1000)    /**< Time (microseconds) between updating and printing average statistics */
+#define TASVIR_SYNC_INTERNAL_US (50 * 1000) /**< Time (microseconds) between internal synchronization intervals */
+#define TASVIR_SYNC_EXTERNAL_US (250 * 1000)  /**< Time (microseconds) between external synchronization intervals */
 #define TASVIR_HEARTBEAT_US (1 * 1000 * 1000) /**< Time (microseconds) after which a node may be announced dead */
 
-#define TASVIR_ETH_PROTO (0x88b6)               /**< Ethernet protocol number to distinguish Tasvir traffic */
-#define TASVIR_HUGEPAGE_SIZE (size_t)(2 << 20)  /**< Size of the huge pages to use */
-#define TASVIR_NR_AREAS_MAX (1024)              /**< Maximum number of areas */
-#define TASVIR_NR_AREA_LOGS (4)                 /**< Number of logs (time intervals) to maintain per area */
-#define TASVIR_NR_CACHELINES_PER_MSG (21)       /**< Number of cachelines that fit in a single Tasvir message */
-#define TASVIR_NR_FN (4096)                     /**< Maximum number of RPC functions */
-#define TASVIR_NR_RPC_ARGS (8)                  /**< Maximum number of RPC function arguments */
-#define TASVIR_NR_RPC_MSG (64 * 1024)           /**< Maximum number of outstanding RPC messages */
-#define TASVIR_NR_NODES_AREA (64)               /**< Maximum number of nodes in Tasvir */
-#define TASVIR_NR_SOCKETS (2)                   /**< Maximum number of CPU sockets per node */
-#define TASVIR_NR_SYNC_JOBS (2048)              /**< Maximum number of internal sync jobs */
-#define TASVIR_NR_THREADS_LOCAL (64)            /**< Maximum number of local threads */
-#define TASVIR_PKT_BURST (32)                   /**< Packet burst size to use for I/O */
-#define TASVIR_RING_SIZE (256)                  /**< Maximum size (bytes) of ring for internal I/O */
-#define TASVIR_RING_EXT_SIZE (2048)             /**< Maximum size (bytes) of ring for external I/O */
-#define TASVIR_STRLEN_MAX (32)                  /**< Maximum size (bytes) of strings */
-#define TASVIR_SYNC_JOB_BYTES (size_t)(1 << 21) /**< Maximum size (bytes) of each synchronization mini-job */
-#define TASVIR_THREAD_DAEMON_IDX (0)            /**< Local thread index for the daemon thread */
+#define TASVIR_ETH_PROTO (0x88b6)              /**< Ethernet protocol number to distinguish Tasvir traffic */
+#define TASVIR_HUGEPAGE_SIZE (size_t)(2 << 20) /**< Size of the huge pages to use */
+#define TASVIR_NR_AREAS_MAX (1024)             /**< Maximum number of areas */
+#define TASVIR_NR_AREA_LOGS (4)                /**< Number of logs (time intervals) to maintain per area */
+#define TASVIR_NR_CACHELINES_PER_MSG (21)      /**< Number of cachelines that fit in a single Tasvir message */
+#define TASVIR_NR_FN (4096)                    /**< Maximum number of RPC functions */
+#define TASVIR_NR_RPC_ARGS (8)                 /**< Maximum number of RPC function arguments */
+#define TASVIR_NR_RPC_MSG (64 * 1024)          /**< Maximum number of outstanding RPC messages */
+#define TASVIR_NR_NODES_AREA (64)              /**< Maximum number of nodes in Tasvir */
+#define TASVIR_NR_SOCKETS (2)                  /**< Maximum number of CPU sockets per node */
+#define TASVIR_NR_SYNC_JOBS (2048)             /**< Maximum number of internal sync jobs */
+#define TASVIR_NR_THREADS_LOCAL (64)           /**< Maximum number of local threads */
+#define TASVIR_PKT_BURST (32)                  /**< Packet burst size to use for I/O */
+#define TASVIR_RING_SIZE (256)                 /**< Maximum size (bytes) of ring for internal I/O */
+#define TASVIR_RING_EXT_SIZE (2048)            /**< Maximum size (bytes) of ring for external I/O */
+#define TASVIR_STRLEN_MAX (32)                 /**< Maximum size (bytes) of strings */
+#define TASVIR_THREAD_DAEMON_IDX (0)           /**< Local thread index for the daemon thread */
 
 #define __TASVIR_LOG2(x) (31 - __builtin_clz(x | 1)) /**< Compile-time log2 for numbers that are power of two */
 
@@ -253,10 +252,14 @@ typedef struct tasvir_msg_rpc {
  */
 typedef struct tasvir_msg_mem {
     tasvir_msg h;
+    tasvir_area_desc *d;
     void *addr;
     size_t len;
+    bool last;
     tasvir_cacheline line[TASVIR_NR_CACHELINES_PER_MSG] __attribute__((aligned(TASVIR_CACHELINE_BYTES)));
 } __attribute__((__packed__)) tasvir_msg_mem;
+TASVIR_STATIC_ASSERT(sizeof(tasvir_msg_mem) - sizeof(struct rte_mbuf) - RTE_PKTMBUF_HEADROOM < 1518,
+                     "sizeof(tasvir_msg_mem) exceeds ethernet MTU.");
 
 /**
  *
@@ -327,6 +330,7 @@ typedef struct tasvir_area_header {
     struct {
         bool rw; /* used to id the writer version */
         bool local;
+        bool external_sync_pending;
     } private_tag; /* not to be synced */
     tasvir_area_desc *d __attribute__((aligned(1 << TASVIR_SHIFT_BIT)));
     uint64_t version;
@@ -347,6 +351,7 @@ typedef struct tasvir_area_header {
  */
 typedef struct tasvir_sync_stats {
     uint64_t count;
+    uint64_t failed;
     uint64_t cumtime_us;
     uint64_t cumbytes;
     uint64_t cumbytes_rx;
