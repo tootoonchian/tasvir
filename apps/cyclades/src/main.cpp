@@ -35,7 +35,7 @@ DEFINE_bool(least_squares, false, "Sparse least squares application type.");
 int main(int argc, char **argv) {
     gflags::ParseCommandLineFlags(&argc, &argv, true);
     pin_to_core(FLAGS_core);
-    tasvir_area_desc *root_desc = tasvir_init(TASVIR_THREAD_TYPE_APP, FLAGS_core, NULL);
+    tasvir_area_desc *root_desc = tasvir_init(FLAGS_core, NULL);
     if (!root_desc) {
         std::cerr << "tasvir_init failed" << std::endl;
         abort();

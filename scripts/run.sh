@@ -3,23 +3,25 @@
 RUNSCRIPT=$(realpath ${BASH_SOURCE[0]})
 SCRIPTDIR=$(dirname $RUNSCRIPT)
 LOGDIR=$SCRIPTDIR/log
+DPDK_DRIVER=${DPDK_DRIVER:-igb_uio}
 TASVIR_SRCDIR=$(realpath `dirname $RUNSCRIPT`/..)
 TASVIR_CONFDIR=$TASVIR_SRCDIR/etc
 TASVIR_CONF=$TASVIR_CONFDIR/tasvir.conf
 TASVIR_BINDIR=$TASVIR_SRCDIR/build/bin
 PIDFILE_PREFIX=/var/run/tasvir-
+RTE_SDK=${RTE_SDK:-/srv/resq/nf/dpdk-v18.08}
 
 prepare() {
     echo never >/sys/kernel/mm/transparent_hugepage/enabled
     sysctl vm.nr_hugepages=1050 &>/dev/null
 
-    modprobe igb_uio &>/dev/null
+    modprobe $DPDK_DRIVER &>/dev/null
     if [[ ${HOST_NIC[$HOSTNAME]} = *"bonding="*  ]]; then
         echo ${HOST_NIC[$HOSTNAME]} | sed 's/slave=/\n/g' | sed 's/,.*//g' | grep ^0000: | while read i; do
-            $RTE_SDK/usertools/dpdk-devbind.py --force -b igb_uio $i &>/dev/null
+            $RTE_SDK/usertools/dpdk-devbind.py --force -b $DPDK_DRIVER $i &>/dev/null
         done
     else
-        $RTE_SDK/usertools/dpdk-devbind.py --force -b igb_uio ${HOST_NIC[$HOSTNAME]} &>/dev/null
+        $RTE_SDK/usertools/dpdk-devbind.py --force -b $DPDK_DRIVER ${HOST_NIC[$HOSTNAME]} &>/dev/null
     fi
 
     for pidfile in ${PIDFILE_PREFIX}*; do
@@ -53,7 +55,7 @@ prepare() {
     # disable uncore frequency scaling
     wrmsr -a 0x620 0x1d1d
     date > /tmp/prepare.done
-    pkill -f "tail -f.*log"
+    pkill -f "tail.*-f.*.$HOSTNAME"
     mkdir $LOGDIR &>/dev/null
 }
 
@@ -63,32 +65,36 @@ compile() {
 
     mkdir $TASVIR_SRCDIR/build &>/dev/null
     cd $TASVIR_SRCDIR/build
-    cmake -DCMAKE_BUILD_TYPE=Release .. || exit
-    make || exit
+    if which ninja >/dev/null; then
+        cmake -GNinja -DCMAKE_BUILD_TYPE=Release .. && ninja
+    else
+        cmake -DCMAKE_BUILD_TYPE=Release .. && make
+    fi
 }
 
 generate_cmd() {
     generate_cmd_thread() {
-        local gdbcmd
         local redirect
-        if [ $tid == d -o $tid == 0 ]; then
-            #gdbcmd="gdb -ex run --args"
+        #if [ $wid == d -o $wid == 0 ]; then
+        #    #gdbcmd="gdb -ex run --args"
+        #    redirect="2>&1 | tee $logfile"
+        #else
+        #    redirect=">$logfile 2>&1"
+        #fi
+        if [ ! -z "$DEBUG" ]; then
             redirect="2>&1 | tee $logfile"
+            cmd_thread="exec /usr/bin/taskset -c %CORE% gdb -ex run --args stdbuf -o 0 -e 0 $* $redirect"
         else
             redirect=">$logfile 2>&1"
+            cmd_thread="start-stop-daemon --background --start --make-pidfile --pidfile ${PIDFILE_PREFIX}%WID%.pid --startas /bin/bash -- -c
+                        \"exec /usr/bin/taskset -c %CORE% stdbuf -o 0 -e 0 $* $redirect\";"
+            cmd_thread+="sleep 1; stdbuf -o 0 -e 0 tail -n 1000 -f $logfile"
         fi
-        #gdbcmd="gdb -ex run --args"
-        #redirect="2>&1 | tee $logfile"
-        redirect=">$logfile 2>&1"
-
-        cmd_thread="start-stop-daemon --background --start --make-pidfile --pidfile ${PIDFILE_PREFIX}%TID%.pid --startas /bin/bash -- -c
-                    \"exec /usr/bin/numactl -C %CORE% $gdbcmd stdbuf -o 0 -e 0 $* $redirect\";"
-        cmd_thread+="sleep 1; stdbuf -o 0 -e 0 tail -n 1000 -f $logfile"
-        cmd_thread=$(echo $cmd_thread | sed -e s/%CORE%/$core/g -e s/%TID%/$tid/g -e s/%NTHREADS%/$nthreads/g -e s/%HOST%/$host/g)
+        cmd_thread=$(echo $cmd_thread | sed -e s/%CORE%/$core/g -e s/%WID%/$wid/g -e s/%NR_WORKERS%/$nr_workers/g -e s/%HOST%/$host/g)
         ((core--))
     }
 
-    local nthreads=${nthreads:-1}
+    local nr_workers=${nr_workers:-1}
     local delay=${delay:-3}
 
     local host_counter=0
@@ -99,14 +105,14 @@ generate_cmd() {
     local cmd_app="$*"
     local cmd_ssh
     local cmd_thread
-    local session=tasvir_run
+    local session=tasvir_run_$host
     local w=-1
     local p=0
     local timestamp=`date +"%Y%m%d-%H%M%S"`
     local window
-    local logdir="$LOGDIR/$timestamp"
+    local logdir="$LOGDIR/$host.$timestamp"
     local manifest="$logdir/manifest"
-    local logfile="$logdir/t%TID%.%HOST%"
+    local logfile="$logdir/t%WID%.%HOST%"
     local threads_this=0
 
     local cmd_byobu="byobu "
@@ -117,44 +123,44 @@ generate_cmd() {
     cmd_byobu+="set-window-option -gq mode-mouse on\; "
     cmd_byobu+="set-window-option -gq remain-on-exit off\; "
     tmux has-session -t $session &>/dev/null || cmd_byobu+="new-session -Ads $session\; "
+    [ -z $TMUX ] && cmd_byobu+="attach-session -t $session\; " || cmd_byobu+="switch-client -t $session\; "
 
     cmd="mkdir -p $logdir &>/dev/null;"
     cmd+="$cmd_byobu"
-    [ -z $TMUX ] && cmd+="attach-session -t $session\; " || cmd+="switch-client -t $session\; "
 
-    for tid in `seq 0 $((nthreads - 1))`; do
-        [ $tid -ne 0 -a $((tid % 16)) -eq 0 ] && cmd+="; $cmd_byobu "
-        if [ $threads_this -eq "${host_nthreads[$host_counter]}" ]; then
+    for wid in `seq 0 $((nr_workers - 1))`; do
+        [ $wid -ne 0 -a $((wid % 16)) -eq 0 ] && cmd+="detach; $cmd_byobu "
+        if [ $threads_this -eq "${host_nr_workers[$host_counter]}" ]; then
             ((host_counter++))
             host=${host_list[$host_counter]}
             threads_this=0
         fi
         if [ $threads_this -eq 0 ]; then
-            [ $tid -ne 0 ] && cmd+="select-layout "$([ $w -le 0 ] && echo main-horizontal || echo tiled)"\; "
+            [ $wid -ne 0 ] && cmd+="select-layout "$([ $w -le 0 ] && echo main-horizontal || echo tiled)"\; "
             cmd+="select-layout tiled\; "
             # run the daemon
             local pciaddr=${HOST_NIC[$host]}
             local core=$((HOST_NCORES[$host] - 1))
-            local cmd_daemon="$TASVIR_BINDIR/tasvir_daemon --core %CORE% --pciaddr $pciaddr"$([ $tid -eq 0 ] && echo " --root")
-            local tid2=$tid
-            tid=d
+            local cmd_daemon="$TASVIR_BINDIR/tasvir_daemon --core %CORE% --pciaddr $pciaddr"$([ $wid -eq 0 ] && echo " --root")
+            local wid2=$wid
+            wid=d
             cmd_ssh=$([ $HOSTNAME != "$host" ] && echo "ssh -t $host")
             w=-1
             p=1
-            window=$host-n$nthreads-$timestamp-$((++w))
+            window=$host-n$nr_workers-$timestamp-$((++w))
             generate_cmd_thread $cmd_daemon
             cmd+="new-window -t $session -n $window $cmd_ssh '$cmd_thread'\; "
             cmd+="split-window -t $session:$window "
-            tid=$tid2
+            wid=$wid2
             threads_this=1
         elif [ $((p % 3)) -eq 0 -a $w -eq 0 ]; then
             cmd+="select-layout main-horizontal\; "
-            window=$host-$nthreads-$timestamp-$((++w))
+            window=$host-$nr_workers-$timestamp-$((++w))
             cmd+="new-window -t $session -n $window "
             p=0
         elif [ $((p % 4)) -eq 0 ]; then
             cmd+="select-layout tiled\; "
-            window=$host-$nthreads-$timestamp-$((++w))
+            window=$host-$nr_workers-$timestamp-$((++w))
             cmd+="new-window -t $session -n $window "
             p=0
         else
@@ -169,7 +175,7 @@ generate_cmd() {
     done
 
     cmd+="select-layout "$([ $w -eq 0 ] && echo main-horizontal || echo tiled)"\; "
-    cmd+="split-window -t $session:$window 'echo -e nthreads=$nthreads cmd_app=$cmd_app > $manifest' ;"
+    cmd+="split-window -t $session:$window 'echo -e nr_workers=$nr_workers cmd_app=$cmd_app > $manifest' ;"
 
     cmd_prepare=
     for h in `seq 0 $host_counter`; do
@@ -197,12 +203,6 @@ setup_env() {
     vm.nr_hugepages = 1050
 EOF
     service procps restart
-    cat >/etc/profile.d/dpdk.sh <<EOF
-export RTE_ARCH=x86_64
-export RTE_SDK=/opt/resq/nf/dpdk-v18.02
-export RTE_TARGET=tasvir
-EOF
-    chmod +x /etc/profile.d/dpdk.sh
 
     # Vim
     cat >/root/.vimrc.before.local <<EOF
@@ -229,11 +229,11 @@ run_proxy() {
         done
         local app_cmd=$1_cmd
         local hl=$1_host_list[@]
-        local hn=$1_host_nthreads[@]
-        local nt=$1_nthreads
+        local hn=$1_host_nr_workers[@]
+        local nt=$1_nr_workers
         host_list=("${host_list[@]:-${!hl}}")
-        host_nthreads=("${host_nthreads[@]:-${!hn}}")
-        nthreads=${nthreads:-${!nt}}
+        host_nr_workers=("${host_nr_workers[@]:-${!hn}}")
+        nr_workers=${nr_workers:-${!nt}}
         cmd=$(eval echo ${!app_cmd})
         eval $(generate_cmd $cmd)
     fi
@@ -248,7 +248,7 @@ while read host ncores netdev; do
 done <<< $(grep -v '^#' $TASVIR_CONF | grep .)
 
 IFS=' ' read -r -a host_list <<< "$host_list"
-IFS=' ' read -r -a host_nthreads <<< "$host_nthreads"
+IFS=' ' read -r -a host_nr_workers <<< "$host_nr_workers"
 
 if [ $# == 1 ]; then
     run_proxy $1

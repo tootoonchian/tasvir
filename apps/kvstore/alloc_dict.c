@@ -1,16 +1,13 @@
 #include "alloc_dict.h"
-#include "tasvir.h"
 #include <string.h>
+#include <tasvir/tasvir.h>
 #define __unused __attribute__((__unused__))
 
 
 #if !(NO_LOG)
-inline static void wrap_log_write(void *data, size_t size) {
-    tasvir_log_write(data, size);
-}
+inline static void wrap_log_write(void *data, size_t size) { tasvir_log_write(data, size); }
 #else
-inline static void wrap_log_write(__unused void *data, __unused size_t size) {
-}
+inline static void wrap_log_write(__unused void *data, __unused size_t size) {}
 #endif
 static void keyDestructor(void *privdata, void *key) {
     Allocator *a = ((dictWrapper *)privdata)->keyAllocator;
@@ -37,18 +34,16 @@ static void entryDestructor(void *privdata, dictEntry *e) {
 
 static dictEntry *entryConstructor(void *privdata) {
     Allocator *a = ((dictWrapper *)privdata)->entryAllocator;
-    dictEntry* entry =  (dictEntry *)alloc_allocator(a);
+    dictEntry *entry = (dictEntry *)alloc_allocator(a);
     wrap_log_write(a, sizeof(Allocator));
     wrap_log_write(entry, sizeof(dictEntry));
     return entry;
 }
 
-static void entryModed(__unused void *privdata, dictEntry **entry) {
-    wrap_log_write(entry, sizeof(dictEntry*));
-}
+static void entryModed(__unused void *privdata, dictEntry **entry) { wrap_log_write(entry, sizeof(dictEntry *)); }
 
 char *allocKey(dictWrapper *w, const char *key) {
-    char *dictKey = (char*)alloc_allocator(w->keyAllocator);
+    char *dictKey = (char *)alloc_allocator(w->keyAllocator);
     wrap_log_write(w->keyAllocator, sizeof(Allocator));
 
     strcpy(dictKey, key);
@@ -75,8 +70,9 @@ static int compareCallback(__unused void *privdata, const void *key1, const void
     return memcmp(key1, key2, l1) == 0;
 }
 
-dictType AllocDictType = {hashCallback,     NULL,           NULL, compareCallback, keyDestructor, valDestructor,
-                          entryConstructor, entryDestructor, entryModed};
+dictType AllocDictType = {
+    hashCallback,    NULL,      NULL, compareCallback, keyDestructor, valDestructor, entryConstructor,
+    entryDestructor, entryModed};
 
 dictWrapper *initDictWrapper(void *space, size_t len, void *entrySpace, size_t entrySize, void *keySpace, size_t keyLen,
                              size_t keySize, void *valSpace, size_t valLen, size_t valSize) {
@@ -97,5 +93,5 @@ dictWrapper *initDictWrapper(void *space, size_t len, void *entrySpace, size_t e
 
 dictWrapper *subscribeDict(void *space) {
     // This depends on address being same for diff regions.
-    return (dictWrapper*)space;
+    return (dictWrapper *)space;
 }

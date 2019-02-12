@@ -1,9 +1,9 @@
+#ifdef TASVIR_DAEMON
 #include <assert.h>
 #include <errno.h>
 #include <execinfo.h>
 #include <getopt.h>
 #include <rte_cycles.h>
-#include <signal.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -30,20 +30,16 @@ void handler(int sig) {
 
 int main(int argc, char **argv) {
     signal(SIGSEGV, handler);
-    uint8_t daemon_type = TASVIR_THREAD_TYPE_DAEMON;
     int core = -1;
     char *pciaddr = NULL;
 
-    int c;
     while (1) {
-        int option_index = 0;
         static struct option long_options[] = {{"core", required_argument, 0, 'c'},
                                                {"pciaddr", required_argument, 0, 'p'},
                                                {"root", no_argument, 0, 'r'},
                                                {"help", no_argument, 0, 'h'},
                                                {0, 0, 0, 0}};
-
-        c = getopt_long(argc, argv, "c:p:rh", long_options, &option_index);
+        int c = getopt_long(argc, argv, "c:p:rh", long_options, NULL);
         if (c == -1)
             break;
 
@@ -55,7 +51,7 @@ int main(int argc, char **argv) {
             pciaddr = optarg;
             break;
         case 'r':
-            daemon_type = TASVIR_THREAD_TYPE_ROOT;
+            ttld.is_root = true;
             break;
         case 'h':
             usage(argv[0]);
@@ -81,10 +77,14 @@ int main(int argc, char **argv) {
         fprintf(stderr, "no pciaddr provided\n");
         usage(argv[0]);
     }
+    if (setenv("TASVIR_PCIADDR", pciaddr, 1) != 0) {
+        fprintf(stderr, "failed to environment variable TASVIR_PCIADDR to %s\n", pciaddr);
+        return -1;
+    }
 
-    tasvir_area_desc *root_desc = tasvir_init(daemon_type, core, pciaddr);
+    tasvir_area_desc *root_desc = tasvir_init(core);
     if (!root_desc) {
-        fprintf(stderr, "tasvir_daemon: tasvir_init_daemon failed\n");
+        fprintf(stderr, "tasvir_init_daemon failed\n");
         return -1;
     }
 
@@ -95,3 +95,5 @@ int main(int argc, char **argv) {
 
     return 0;
 }
+
+#endif

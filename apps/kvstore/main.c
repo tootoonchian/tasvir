@@ -4,11 +4,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <tasvir/tasvir.h>
 #include <time.h>
 #include <unistd.h>
 #include "alloc.h"
 #include "alloc_dict.h"
-#include "tasvir.h"
 #define __unused __attribute__((__unused__))
 /*#define _ALLOC_TEST_*/
 #define CONSISTENCY 0
@@ -127,7 +127,7 @@ struct operation *parse_line(char *line, ssize_t len) {
     return entry;
 }
 
-inline void update(dictWrapper *w, char *key, char *value) {
+/* inline */ void update(dictWrapper *w, char *key, char *value) {
     char *dictKey = allocKey(w, key);
     void *dictVal = allocVal(w, value, strlen(value));
 #if CONSISTENCY
@@ -273,8 +273,8 @@ inline void timespec_diff(struct timespec *start, struct timespec *stop, struct 
 
 static void *thread_code(void *init_struct) {
     struct thread_init *args = (struct thread_init *)init_struct;
-    tasvir_area_desc param = {};
-    tasvir_area_desc param_lock = {};
+    tasvir_area_desc param = {0};
+    tasvir_area_desc param_lock = {0};
     tasvir_area_desc *d[MAX_SERVERS] = {NULL};
     tasvir_area_desc *l[MAX_SERVERS] = {NULL};  // Used for barrier
     tasvir_area_desc *root_desc = NULL;
@@ -304,7 +304,7 @@ static void *thread_code(void *init_struct) {
     printf("Running id %d on core %d\n", args->id, args->core);
 
     /* Step 0: Initialize our bit */
-    root_desc = tasvir_init(TASVIR_THREAD_TYPE_APP, args->core, NULL);
+    root_desc = tasvir_init(args->core);
     if (!root_desc) {
         printf("test_ctrl: tasvir_init failed\n");
         return NULL;
