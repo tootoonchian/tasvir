@@ -73,7 +73,7 @@ compile() {
 }
 
 generate_cmd() {
-    generate_cmd_thread() {
+    generate_cmd_worker() {
         local redirect
         #if [ $wid == d -o $wid == 0 ]; then
         #    #gdbcmd="gdb -ex run --args"
@@ -83,14 +83,14 @@ generate_cmd() {
         #fi
         if [ ! -z "$DEBUG" ]; then
             redirect="2>&1 | tee $logfile"
-            cmd_thread="exec /usr/bin/taskset -c %CORE% gdb -ex run --args stdbuf -o 0 -e 0 $* $redirect"
+            cmd_worker="exec /usr/bin/taskset -c %CORE% gdb -ex run --args stdbuf -o 0 -e 0 $* $redirect"
         else
             redirect=">$logfile 2>&1"
-            cmd_thread="start-stop-daemon --background --start --make-pidfile --pidfile ${PIDFILE_PREFIX}%WID%.pid --startas /bin/bash -- -c
+            cmd_worker="start-stop-daemon --background --start --make-pidfile --pidfile ${PIDFILE_PREFIX}%WID%.pid --startas /bin/bash -- -c
                         \"exec /usr/bin/taskset -c %CORE% stdbuf -o 0 -e 0 $* $redirect\";"
-            cmd_thread+="sleep 1; stdbuf -o 0 -e 0 tail -n 1000 -f $logfile"
+            cmd_worker+="sleep 1; stdbuf -o 0 -e 0 tail -n 1000 -f $logfile"
         fi
-        cmd_thread=$(echo $cmd_thread | sed -e s/%CORE%/$core/g -e s/%WID%/$wid/g -e s/%NR_WORKERS%/$nr_workers/g -e s/%HOST%/$host/g)
+        cmd_worker=$(echo $cmd_worker | sed -e s/%CORE%/$core/g -e s/%WID%/$wid/g -e s/%NR_WORKERS%/$nr_workers/g -e s/%HOST%/$host/g)
         ((core--))
     }
 
@@ -104,82 +104,89 @@ generate_cmd() {
     local cmd
     local cmd_app="$*"
     local cmd_ssh
-    local cmd_thread
+    local cmd_worker
     local session=tasvir_run_$host
-    local w=-1
-    local p=0
-    local timestamp=`date +"%Y%m%d-%H%M%S"`
+    local pane=0
+    local timestamp=`date +"%Y%m%d_%H%M%S"`
     local window
+    local window_idx=0
     local logdir="$LOGDIR/$host.$timestamp"
     local manifest="$logdir/manifest"
     local logfile="$logdir/t%WID%.%HOST%"
-    local threads_this=0
-
-    local cmd_byobu="byobu "
-    cmd_byobu+="set-option -gq mouse-utf8 on\; "
-    cmd_byobu+="set-option -gq mouse-resize-pane on\; "
-    cmd_byobu+="set-option -gq mouse-select-pane on\; "
-    cmd_byobu+="set-option -gq mouse-select-window on\; "
-    cmd_byobu+="set-window-option -gq mode-mouse on\; "
-    cmd_byobu+="set-window-option -gq remain-on-exit off\; "
-    tmux has-session -t $session &>/dev/null || cmd_byobu+="new-session -Ads $session\; "
-    [ -z $TMUX ] && cmd_byobu+="attach-session -t $session\; " || cmd_byobu+="switch-client -t $session\; "
+    local nr_worker_cur=0
 
     cmd="mkdir -p $logdir &>/dev/null;"
-    cmd+="$cmd_byobu"
+    cmd+="byobu "
+    tmux has-session -t $session &>/dev/null || cmd+="new-session -Ads $session\; "
+    cmd+="set-option -t $session -q mouse-utf8 on\; "
+    cmd+="set-option -t $session -q mouse-resize-pane on\; "
+    cmd+="set-option -t $session -q mouse-select-pane on\; "
+    cmd+="set-option -t $session -q mouse-select-window on\; "
+    cmd+="set-option -t $session -q window-style 'fg=colour247,bg=colour236'\; "
+    cmd+="set-option -t $session -q window-active-style 'fg=colour250,bg=black'\; "
+    cmd+="set-window-option -t $session -q mode-mouse on\; "
+    cmd+="set-window-option -t $session -q remain-on-exit off\; "
+    # [ -z $TMUX ] && cmd+="attach-session -t $session\; " || cmd+="switch-client -t $session\; "
 
+    # wid: worker_id
     for wid in `seq 0 $((nr_workers - 1))`; do
-        [ $wid -ne 0 -a $((wid % 16)) -eq 0 ] && cmd+="detach; $cmd_byobu "
-        if [ $threads_this -eq "${host_nr_workers[$host_counter]}" ]; then
+        # move to the next host if numbers of workers reached the preset threshold
+        if [ $nr_worker_cur -eq "${host_nr_workers[$host_counter]}" ]; then
             ((host_counter++))
             host=${host_list[$host_counter]}
-            threads_this=0
+            nr_worker_cur=0
+            pane=0
         fi
-        if [ $threads_this -eq 0 ]; then
-            [ $wid -ne 0 ] && cmd+="select-layout "$([ $w -le 0 ] && echo main-horizontal || echo tiled)"\; "
-            cmd+="select-layout tiled\; "
-            # run the daemon
+
+        # create a new window for every 4 panes
+        if [ $((pane % 4)) -eq 0 ]; then
+            [ ! -z $window ] && cmd+="select-layout -t $session:$window tiled\; "
+            window=$host-n$nr_workers-t$timestamp-w$((window_idx++))
+            cmd+="; byobu new-window -t $session -n $window "
+            pane=0
+        fi
+
+        # run the daemon before the first worker
+        if [ $nr_worker_cur -eq 0 ]; then
             local pciaddr=${HOST_NIC[$host]}
             local core=$((HOST_NCORES[$host] - 1))
             local cmd_daemon="$TASVIR_BINDIR/tasvir_daemon --core %CORE% --pciaddr $pciaddr"$([ $wid -eq 0 ] && echo " --root")
             local wid2=$wid
             wid=d
-            cmd_ssh=$([ $HOSTNAME != "$host" ] && echo "ssh -t $host")
-            w=-1
-            p=1
-            window=$host-n$nr_workers-$timestamp-$((++w))
-            generate_cmd_thread $cmd_daemon
-            cmd+="new-window -t $session -n $window $cmd_ssh '$cmd_thread'\; "
-            cmd+="split-window -t $session:$window "
+            cmd_ssh=$([ $HOSTNAME != "$host" ] && echo "ssh -tt $host")
+            window_idx=0
+            window=$host-n$nr_workers-t$timestamp-w$((window_idx++))
+            generate_cmd_worker $cmd_daemon
+            cmd+="$cmd_ssh '$cmd_worker'\; "
+            cmd+="select-pane -t $session:$window.0 -P 'bg=colour240'\; "
             wid=$wid2
-            threads_this=1
-        elif [ $((p % 3)) -eq 0 -a $w -eq 0 ]; then
-            cmd+="select-layout main-horizontal\; "
-            window=$host-$nr_workers-$timestamp-$((++w))
-            cmd+="new-window -t $session -n $window "
-            p=0
-        elif [ $((p % 4)) -eq 0 ]; then
-            cmd+="select-layout tiled\; "
-            window=$host-$nr_workers-$timestamp-$((++w))
-            cmd+="new-window -t $session -n $window "
-            p=0
-        else
+            nr_worker_cur=1
+            pane=1
+        fi
+
+        # create a new pane
+        if [ $((pane % 4)) -ne 0 ]; then
             cmd+="split-window -t $session:$window "
         fi
 
         # run the worker
-        generate_cmd_thread $cmd_app
-        ((p++))
-        cmd+="$cmd_ssh 'ulimit -c unlimited; sleep $delay; $cmd_thread'\; "
-        ((threads_this++))
+        generate_cmd_worker $cmd_app
+        ((pane++))
+        cmd+="$cmd_ssh 'ulimit -c unlimited; sleep $delay; $cmd_worker'\; "
+        ((nr_worker_cur++))
     done
 
-    cmd+="select-layout "$([ $w -eq 0 ] && echo main-horizontal || echo tiled)"\; "
-    cmd+="split-window -t $session:$window 'echo -e nr_workers=$nr_workers cmd_app=$cmd_app > $manifest' ;"
+    cmd+="; sleep 1; byobu "
+    cmd+="kill-window -t $session:0\; "
+    cmd+="select-layout -t $session:$window tiled\; "
+    window=${host_list[0]}-n$nr_workers-t$timestamp-w0
+    cmd+="select-window -t $session:$window\; "
+    cmd+="select-pane -t $session:$window.1\; "
+    cmd+="; echo -e nr_workers=$nr_workers cmd_app=$cmd_app > $manifest;"
 
-    cmd_prepare=
+    local cmd_prepare=
     for h in `seq 0 $host_counter`; do
-        cmd_prepare+="ssh -t ${host_list[$h]} $RUNSCRIPT prepare; "
+        cmd_prepare+="ssh -tt ${host_list[$h]} $RUNSCRIPT prepare; "
     done
     echo "$cmd_prepare $cmd"
 }
