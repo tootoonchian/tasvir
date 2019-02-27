@@ -5,7 +5,7 @@
 
 
 #if !(NO_LOG)
-inline static void wrap_log_write(void *data, size_t size) { tasvir_log_write(data, size); }
+inline static void wrap_log_write(void *data, size_t size) { tasvir_log(data, size); }
 #else
 inline static void wrap_log_write(__unused void *data, __unused size_t size) {}
 #endif

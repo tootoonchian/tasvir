@@ -117,16 +117,28 @@ TASVIR_PUBLIC int tasvir_rpc_wait(uint64_t timeout_us, void **retval, tasvir_are
 TASVIR_PUBLIC int tasvir_rpc_fn_register(tasvir_fn_desc *fnd);
 
 /**
- * @brief Invokes the Tasvir service routine.
+ * @brief
+ *   Invokes the Tasvir service routine.
  *   Handles pending RPC requests and invokes a synchronization routine if one is scheduled by the daemon
  *   (i.e., enough time has elapsed since last synchronization).
  *
  * @return
  *   0 if an internal synchronization took place, an error code (-1 for now) otherwise.
  * @note
- *   You should call this function frequently (microsecond time scale).
+ *   Call this function every few microseconds (more frequently than TASVIR_BARRIER_ENTER_US / 2)
+ *   except when Tasvir area are not in use (tasvir_set_active(false)).
  */
 TASVIR_PUBLIC int tasvir_service();
+
+/**
+ * @brief
+ *   Marks the thread inactive; synchronization will proceed without this thread.
+ *   A thread marked inactive must not interact with Tasvir-allocated areas.
+ *   By default, threads are marked active and expected to check in frequqently
+ *
+ *   Mark a thread inactive before engaging in lengthy initialization or disk I/O.
+ */
+TASVIR_PUBLIC void tasvir_set_active(bool active);
 
 /**
  * @brief
@@ -284,7 +296,7 @@ static inline void *tasvir_data2shadow(void *data) { return (uint8_t *)data + TA
  * @param len
  *   Size of the change in bytes.
  */
-static __always_inline void tasvir_log_write(void *data, size_t len) {
+static __always_inline void tasvir_log(void *data, size_t len) {
     tasvir_log_t *log = tasvir_data2logunit(data);
     // _mm_prefetch(log, _MM_HINT_NTA);
 
@@ -313,12 +325,12 @@ static __always_inline void tasvir_log_write(void *data, size_t len) {
     }
 
 #ifdef TASVIR_DEBUG_TRACKING
-    fprintf(stderr, "%16d %-22.22s %p-%p (%luB) log:%p-%p bit:%lu-%lu\n", 0, "tasvir_log_write", data, data1, len,
+    fprintf(stderr, "%16d %-22.22s %p-%p (%luB) log:%p-%p bit:%lu-%lu\n", 0, "tasvir_log", data, data1, len,
             (void *)log0, (void *)log1, idx0, idx1);
 #endif
 }
 
-static __always_inline void tasvir_log_write2(const void *data, size_t len) {
+static __always_inline void tasvir_log2(const void *data, size_t len) {
     tasvir_log_t *log0 = tasvir_data2logunit(data);
     // _mm_prefetch(log0, _MM_HINT_NTA);
     uint64_t idx0 = tasvir_data2logbit(data);
@@ -340,7 +352,7 @@ static __always_inline void tasvir_log_write2(const void *data, size_t len) {
     }
 
 #ifdef TASVIR_DEBUG_TRACKING
-    fprintf(stderr, "%16d %-22.22s %p-%p (%luB) log:%p-%p bit:%lu-%lu\n", 0, "tasvir_log_write", data, data1, len,
+    fprintf(stderr, "%16d %-22.22s %p-%p (%luB) log:%p-%p bit:%lu-%lu\n", 0, "tasvir_log", data, data1, len,
             (void *)log0, (void *)log1, idx0, idx1);
 #endif
 }

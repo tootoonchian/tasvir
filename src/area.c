@@ -131,14 +131,14 @@ tasvir_area_desc *tasvir_new(tasvir_area_desc desc) {
                 return NULL;
             }
             (*nr_areas)++;
-            tasvir_log_write(nr_areas, sizeof(*nr_areas));
+            tasvir_log(nr_areas, sizeof(*nr_areas));
         }
         memcpy(d, &desc, sizeof(tasvir_area_desc));
         d->h = h;
         if (d->boot_us == 0)
             d->boot_us = time_us;
         d->active = true;
-        tasvir_log_write(d, sizeof(tasvir_area_desc));
+        tasvir_log(d, sizeof(tasvir_area_desc));
     } else if (tasvir_rpc_wait(5 * S2US, (void **)&d, desc.pd, (tasvir_fnptr)&tasvir_new, desc) != 0)
         return NULL;
 
@@ -158,7 +158,7 @@ tasvir_area_desc *tasvir_new(tasvir_area_desc desc) {
         d->h->private_tag.external_sync_pending = false;
         d->h->d = d;
         d->h->version = 1;
-        d->h->update_us = time_us;
+        d->h->time_us = time_us;
         d->h->nr_areas = 0;
         d->h->nr_users = 1;
         d->h->users[0].node = ttld.node;
@@ -172,7 +172,7 @@ tasvir_area_desc *tasvir_new(tasvir_area_desc desc) {
             log->data = (tasvir_log_t *)((uint8_t *)d->h + offset_log + i * size_log);
         }
         d->h->active = true;
-        tasvir_log_write(&d->h->d, sizeof(tasvir_area_header) - offsetof(tasvir_area_header, d));
+        tasvir_log(&d->h->d, sizeof(tasvir_area_header) - offsetof(tasvir_area_header, d));
     }
 
     LOG_INFO(
@@ -214,8 +214,8 @@ int tasvir_attach_helper(tasvir_area_desc *d, tasvir_node *node) {
             d->h->users[d->h->nr_users].node = node;
             d->h->users[d->h->nr_users].version = 0;
             d->h->nr_users++;
-            tasvir_log_write(&d->h->nr_users, sizeof(d->h->nr_users));
-            tasvir_log_write(&d->h->users[d->h->nr_users], sizeof(d->h->users[d->h->nr_users]));
+            tasvir_log(&d->h->nr_users, sizeof(d->h->nr_users));
+            tasvir_log(&d->h->users[d->h->nr_users], sizeof(d->h->users[d->h->nr_users]));
         }
 
 #ifdef TASVIR_DAEMON
@@ -335,7 +335,7 @@ int tasvir_update_owner(tasvir_area_desc *d, tasvir_thread *owner) {
 
     if (is_desc_owner) {
         d->owner = owner;
-        tasvir_log_write(&d->owner, sizeof(d->owner));
+        tasvir_log(&d->owner, sizeof(d->owner));
     }
 
     return 0;

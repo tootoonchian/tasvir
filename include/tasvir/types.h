@@ -183,7 +183,7 @@ typedef struct tasvir_area_header {
     } private_tag; /* not to be synced */
     tasvir_area_desc *d __attribute__((aligned(1 << TASVIR_SHIFT_BIT)));
     uint64_t version;
-    uint64_t update_us;
+    uint64_t time_us;
     size_t nr_areas;
     size_t nr_users;
     bool active;
@@ -201,12 +201,13 @@ typedef struct tasvir_area_header {
 typedef struct tasvir_stats {
     uint64_t success;
     uint64_t failure;
-    uint64_t total_synctime_us;
-    uint64_t total_syncbytes;
-    uint64_t total_bytes_rx;
-    uint64_t total_bytes_tx;
-    uint64_t total_pkts_rx;
-    uint64_t total_pkts_tx;
+    uint64_t sync_barrier_us;
+    uint64_t sync_us; /* inclusive of barrier time */
+    uint64_t sync_bytes;
+    uint64_t rx_bytes;
+    uint64_t tx_bytes;
+    uint64_t rx_pkts;
+    uint64_t tx_pkts;
 } tasvir_stats;
 
 #ifdef __cplusplus

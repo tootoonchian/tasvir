@@ -32,7 +32,7 @@ for host_list in ${host_l[@]}; do
     {
     cpu=$(ssh $host_list lscpu | grep -E '(family|Model):' | awk '{print $NF}' | xargs | awk '{print $1"-"$2}')
     ncores=$(ssh $host_list lscpu | grep node0 | sed -e s/,.*//g -e s/.*-//g)
-    nr_workers_l=(1 )
+    nr_workers_l=(1 3 5 7)
     # nr_workers_l=($(seq 1 2 $ncores))
     for nr_workers in ${nr_workers_l[*]}; do
         for size in ${size_l[*]}; do

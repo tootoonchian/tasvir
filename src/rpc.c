@@ -41,7 +41,7 @@ static tasvir_rpc_status *tasvir_vrpc(tasvir_area_desc *d, tasvir_fnptr fnptr, v
     m->h.src_tid = ttld.thread ? ttld.thread->tid : ttld.ndata->nodecast_tid;
     m->h.id = ttld.nr_msgs++ % TASVIR_NR_RPC_MSG;
     m->h.type = TASVIR_MSG_TYPE_RPC_REQUEST;
-    m->h.time_us = d->h ? d->h->update_us : ttld.ndata->time_us;
+    m->h.time_us = d->h ? d->h->time_us : ttld.ndata->time_us;
     m->d = d;
     m->fid = fnd->fid;
     ptr = &m->data[TASVIR_ALIGN_ARG(fnd->ret_len)];
@@ -125,9 +125,9 @@ int tasvir_rpc_wait(uint64_t timeout_us, void **retval, tasvir_area_desc *d, tas
                 break;
             }
             /* FIXME: find a better way to ensure state is visible. what if attached to writer view? */
-            /* FIXME: useless if rpc is not to update the area */
+            /* FIXME: useless if rpc does not update the area */
             done = !rs->response->d ||
-                   (rs->response->d->h->active && rs->response->d->h->update_us >= rs->response->h.time_us);
+                   (rs->response->d->h->active && rs->response->d->h->time_us >= rs->response->h.time_us);
             /* a hack to workaround torn writes during boot time */
             if (unlikely(done && !ttld.thread)) {
                 done = !rs->response->d->h->private_tag.external_sync_pending;
@@ -144,9 +144,9 @@ int tasvir_rpc_wait(uint64_t timeout_us, void **retval, tasvir_area_desc *d, tas
         static const char *tasvir_rpc_status_type_str[] = {"invalid", "pending", "failed", "done"};
         if (rs->response)
             rte_mempool_put(ttld.ndata->mp, (void *)rs->response);
-        LOG_INFO("failed (failed=%d done=%d status=%s h=%p update_us=%lu expected_us=%lu)", failed, done,
+        LOG_INFO("failed (failed=%d done=%d status=%s h=%p time_us=%lu expected_us=%lu)", failed, done,
                  tasvir_rpc_status_type_str[rs->status], rs->response ? (void *)rs->response->d->h : NULL,
-                 rs->response ? rs->response->d->h->update_us : 0, rs->response ? rs->response->h.time_us : 0);
+                 rs->response ? rs->response->d->h->time_us : 0, rs->response ? rs->response->h.time_us : 0);
         return -1;
     }
 

@@ -34,7 +34,7 @@ class Array {
     void Barrier() {
         std::size_t wid;
         _done = _version;
-        tasvir_log_write(&_done, sizeof(_done));
+        tasvir_log(&_done, sizeof(_done));
         tasvir_service_wait(5 * 1000 * 1000);
 
         if (_wid == 0) {
@@ -44,8 +44,8 @@ class Array {
                 }
             _parent->_done = _parent->_version;
             _parent->_version++;
-            tasvir_log_write(&_parent->_done, sizeof(_done));
-            tasvir_log_write(&_parent->_version, sizeof(_version));
+            tasvir_log(&_parent->_done, sizeof(_done));
+            tasvir_log(&_parent->_version, sizeof(_version));
         }
 
         /* block until parent changes version */
@@ -53,13 +53,13 @@ class Array {
             tasvir_service();
 
         _version = _parent->_version;
-        tasvir_log_write(&_version, sizeof(_version));
+        tasvir_log(&_version, sizeof(_version));
     }
 
     void ReduceAdd() {
         if (_wid != 0)
             return;
-        tasvir_log_write(_parent->_data, sizeof(double) * _size);
+        tasvir_log(_parent->_data, sizeof(double) * _size);
         std::fill(_parent->_data, _parent->_data + _size, 0);
         for (std::size_t w = 0; w < _nr_workers; w++) {
             for (int i = 0; i < _size; i++) {
@@ -124,31 +124,16 @@ Array<T>* Array<T>::Allocate(const char* parent_name, uint64_t wid, std::size_t 
     }
 
     worker = reinterpret_cast<Array<T>*>(tasvir_data(d));
-    tasvir_log_write(worker, sizeof(*worker));
+    tasvir_log(worker, sizeof(*worker));
     worker->_size = nr_elements;
     worker->_nr_workers = 0;
     worker->_wid = wid;
     worker->_version = 1;
     worker->_done = 0;
-    worker->_initialized = std::hash<uint64_t>(wid);
+    worker->_initialized = 0xdeadbeef;
 
     if (wid == 0) {
-        param.pd = root_desc;
-        param.len = sizeof(T) * nr_elements + sizeof(Array<T>);
-        param.sync_int_us = 50000;
-        param.sync_ext_us = 500000;
-        snprintf(param.name, sizeof(param.name), "%s-master", name);
-        d = tasvir_new(param);
-        if (!d) {
-            std::cerr << "tasvir_new parent failed" << std::endl;
-            abort();
-        }
-        parent = reinterpret_cast<Array<T>*>(tasvir_data(d));
-        parent->_size = nr_elements;
-        parent->_nr_workers = nr_workers;
-        parent->_wid = wid;
-        parent->_version = 1;
-        parent->_done = 0;
+        worker->_initialized = 0;
 
         for (std::size_t i = 0; i < nr_workers; i++) {
             snprintf(name, sizeof(name), "%s-%d", name, i);
@@ -158,26 +143,28 @@ Array<T>* Array<T>::Allocate(const char* parent_name, uint64_t wid, std::size_t 
                 abort();
             }
             parent->_workers[i] = reinterpret_cast<Array<T>*>(tasvir_data(d));
-            while (!parent->_workers[i] || parent->_workers[i]->_initialized != std::hash<uint64_t>(i))
+            while (!parent->_workers[i] || parent->_workers[i]->_initialized != 0xdeadbeef)
                 tasvir_service();
         }
-        parent->_initialized = std::hash<uint64_t>(0);
-        tasvir_log_write(parent, sizeof(*parent));
+        parent->_initialized = 0xdeadbeef;
+        tasvir_log(parent, sizeof(*parent));
         tasvir_service_wait(5 * 1000 * 1000);
     } else {
+        worker->_initialized = 0xdeadbeef;
+
         tasvir_service_wait(5 * 1000 * 1000);
-        snprintf(name, sizeof(name), "%s-master", name);
+        snprintf(name, sizeof(name), "%s-0", name);
         d = tasvir_attach_wait(root_desc, name, NULL, true, 5 * 1000 * 1000);
         if (!d) {
             std::cerr << "tasvir_attach " << name << " failed" << std::endl;
             abort();
         }
         parent = reinterpret_cast<Array<T>*>(tasvir_data(d));
-        while (parent->_initialized != std::hash<uint64_t>(0))
+        while (parent->_initialized != 0xdeadbeef)
             tasvir_service();
     }
 
-    tasvir_log_write(worker, sizeof(*worker));
+    tasvir_log(worker, sizeof(*worker));
     worker->_parent = parent;
     worker->_nr_workers = parent->_nr_workers;
     std::copy(parent->_workers, parent->_workers + nr_workers, worker->_workers);

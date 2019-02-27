@@ -1,5 +1,36 @@
 #include "tasvir.h"
 
+#ifdef TASVIR_DAEMON
+static inline void tasvir_kill_thread_ownership(tasvir_thread *t, tasvir_area_desc *d) {
+    if (d->type == TASVIR_AREA_TYPE_CONTAINER) {
+        tasvir_area_desc *c = tasvir_data(d);
+        for (size_t i = 0; i < d->h->nr_areas; i++)
+            tasvir_kill_thread_ownership(t, &c[i]);
+    }
+    if (d->owner == t)
+        tasvir_update_owner(d, ttld.thread);
+}
+
+/* caller contract: is_daemon and tasvir_is_thread_local(t) */
+static inline void tasvir_kill_thread(tasvir_thread *t) {
+    tasvir_local_tdata *tdata = &ttld.ndata->tdata[t->tid.idx];
+    LOG_INFO("tid=%d inactive_time=%zd", t->tid.idx, ttld.ndata->time_us - tdata->time_us);
+    rte_ring_free(tdata->ring_rx);
+    rte_ring_free(tdata->ring_tx);
+    memset(tdata, 0, sizeof(*tdata));
+    tdata->state = TASVIR_THREAD_STATE_DEAD;
+
+    /* change ownership */
+    tasvir_kill_thread_ownership(t, ttld.root_desc);
+
+    /* kill by pid */
+    kill(t->tid.pid, SIGKILL);
+
+    // FIXME: node_desc must deactivate
+    t->active = false;
+    tasvir_log(&t->active, sizeof(t->active));
+}
+
 static size_t tasvir_sched_sync_internal_area(tasvir_area_desc *d) {
     if (!d->owner)
         return 0;
@@ -30,32 +61,30 @@ static size_t tasvir_sched_sync_internal_area(tasvir_area_desc *d) {
     return ttld.ndata->job_bytes;
 }
 
-void tasvir_sched_sync_internal() {
+static size_t tasvir_health_check() {
     size_t nr_threads = 0;
-    ttld.ndata->job_bytes = 0;
-
     /* heartbeat: declare unresponsive threads dead */
     for (size_t tid = 0; tid < TASVIR_NR_THREADS_LOCAL; tid++) {
         if (ttld.ndata->tdata[tid].state == TASVIR_THREAD_STATE_RUNNING) {
-            ttld.ndata->tdata[tid].do_sync = false;
-
             /* quick check to see if thread is alive */
-            /* FIXME: ttld.ndata->time_us - ttld.ndata->tdata[tid].update_us > ttld.node->heartbeat_us */
+            /* FIXME: ttld.ndata->time_us - ttld.ndata->tdata[tid].time_us > ttld.node->heartbeat_us */
             if (kill(ttld.node->threads[tid].tid.pid, 0) == -1 && errno == ESRCH) {
                 tasvir_kill_thread(&ttld.node->threads[tid]);
                 continue;
-            }
-
-            /* FIXME: add crash timeout */
-            while (ttld.ndata->tdata[tid].in_sync) {
-                rte_delay_us_block(1);
             }
             nr_threads++;
         }
     }
 
+    return nr_threads;
+}
+
+void tasvir_sched_sync_internal() {
+    size_t nr_threads = tasvir_health_check();
+    ttld.ndata->job_bytes = 0;
+
     ttld.ndata->barrier_end_tsc = tasvir_rdtsc() + tasvir_usec2tsc(TASVIR_BARRIER_ENTER_US);
-    atomic_store(&ttld.ndata->barrier_entry, nr_threads);
+    atomic_store(&ttld.ndata->barrier_cnt, nr_threads);
 
     ttld.ndata->nr_jobs = 0;
     tasvir_walk_areas(ttld.root_desc, &tasvir_sched_sync_internal_area);
@@ -65,13 +94,16 @@ void tasvir_sched_sync_internal() {
     if (ttld.ndata->job_bytes < 64 * 1024)
         ttld.ndata->job_bytes = 64 * 1024;
 
+    /* using tsc as a sync sequence number since it has a healthy gap from the previous one */
+    size_t next_sync_seq = ttld.ndata->barrier_end_tsc;
+    atomic_store(&ttld.ndata->barrier_seq, next_sync_seq);
     for (size_t tid = 0; tid < TASVIR_NR_THREADS_LOCAL; tid++) {
         if (ttld.ndata->tdata[tid].state == TASVIR_THREAD_STATE_RUNNING) {
-            ttld.ndata->tdata[tid].sync_seq = atomic_load(&ttld.ndata->barrier_seq);
-            ttld.ndata->tdata[tid].do_sync = true;
+            ttld.ndata->tdata[tid].next_sync_seq = next_sync_seq;
         }
     }
 }
+#endif
 
 static inline size_t tasvir_sync_internal_job_helper(uint8_t *src, tasvir_log_t *log_internal, size_t len, bool is_rw) {
     size_t nr_bits0 = 0;
@@ -139,8 +171,8 @@ static inline size_t tasvir_sync_internal_job_helper(uint8_t *src, tasvir_log_t 
 }
 
 /* FIXME: expects len to be aligned */
-static inline size_t tasvir_sync_internal_job_helper0(uint8_t *src, tasvir_log_t *log_internal, size_t len,
-                                                      bool is_rw) {
+static inline size_t tasvir_sync_internal_job_helper_vector(uint8_t *src, tasvir_log_t *log_internal, size_t len,
+                                                            bool is_rw) {
     size_t nr_bits0 = 0;
     size_t nr_bits1 = 0;
     size_t nr_bits1_seen = 0;
@@ -249,7 +281,7 @@ static inline bool tasvir_sync_internal_job(tasvir_sync_job *j) {
                 (updated || atomic_load_explicit(&j->bytes_updated, memory_order_relaxed))) {
                 tasvir_log_t log_val = *log_base;
                 tasvir_area_header *h_old = is_rw ? tasvir_data2shadow(j->d->h) : j->d->h;
-                h_old->update_us = h_new->update_us = h_old->diff_log[0].end_us = h_new->diff_log[0].end_us =
+                h_old->time_us = h_new->time_us = h_old->diff_log[0].end_us = h_new->diff_log[0].end_us =
                     ttld.ndata->time_us;
                 h_old->version = h_old->diff_log[0].version_end = h_new->diff_log[0].version_end = h_new->version++;
                 *log_base = log_val | 1UL << 62; /* mark second cacheline modified */
@@ -261,67 +293,53 @@ static inline bool tasvir_sync_internal_job(tasvir_sync_job *j) {
     return j->done;
 }
 
-#if 0
-static bool tasvir_barrier_wait0() {
-    int val = atomic_fetch_sub(&ttld.ndata->barrier_entry, 1) - 1;
-    while (tasvir_rdtsc() < ttld.ndata->barrier_end_tsc && val > 0) {
-        _mm_pause();
-        val = atomic_load(&ttld.ndata->barrier_entry);
-    }
-
-    /* ensure output is either 0 or -1 */
-    while (val > 0 && !atomic_compare_exchange_weak(&ttld.ndata->barrier_entry, &val, -1))
-        val = atomic_load(&ttld.ndata->barrier_entry);
-
-    return val == 0;
-}
-#endif
-
 static bool tasvir_barrier_wait() {
-    if (tasvir_rdtsc() > ttld.ndata->barrier_end_tsc)
-        return false;
+    /* using seq guarantees that barrier succeeds iff all threads are on the same seq */
+    size_t seq = ttld.tdata->next_sync_seq;
+    ttld.tdata->prev_sync_seq = seq;
+    int diff;
 
-    int barrier_seq_old = ttld.tdata->sync_seq;
+    /* last thread */
+    if (atomic_fetch_sub(&ttld.ndata->barrier_cnt, 1) == 1) {
+        /* (A) if CAS fails another thread must have timed out and caused the barrier to fail, so comply! */
+        return atomic_compare_exchange_weak(&ttld.ndata->barrier_seq, &seq, seq + 1);
+    }
 
-    if (atomic_fetch_sub(&ttld.ndata->barrier_entry, 1) == 1) {
-        if (atomic_compare_exchange_weak(&ttld.ndata->barrier_seq, &barrier_seq_old, barrier_seq_old + 1)) {
-            atomic_store(&ttld.ndata->barrier_entry, -1);
-            atomic_fetch_add(&ttld.ndata->barrier_seq, 1);
+    while ((diff = atomic_load(&ttld.ndata->barrier_seq) - seq) == 0) {
+        _mm_pause(); /* don't overwhelm the core unnecessarily */
+        /* (B) a successful timeout is signaled with an increment by two CAS */
+        if (tasvir_rdtsc() > ttld.ndata->barrier_end_tsc &&
+            atomic_compare_exchange_weak(&ttld.ndata->barrier_seq, &seq, seq + 2)) {
+            return false;
         }
     }
 
-    while (atomic_load(&ttld.ndata->barrier_seq) != barrier_seq_old + 2) {
-        _mm_pause();
-        if (tasvir_rdtsc() > ttld.ndata->barrier_end_tsc) {
-            atomic_compare_exchange_weak(&ttld.ndata->barrier_seq, &barrier_seq_old, barrier_seq_old + 2);
-        }
-    }
-
-    return atomic_load(&ttld.ndata->barrier_entry) == -1;
+    return diff == 1;
 }
 
 int tasvir_sync_internal() {
-    ttld.tdata->in_sync = true;
-    ttld.tdata->do_sync = false;
 #ifdef TASVIR_DAEMON
-    ttld.ndata->last_sync_int_start = tasvir_gettime_us();
-    uint64_t time_us = ttld.ndata->time_us;
+    uint64_t time_us = tasvir_gettime_us();
+    ttld.ndata->last_sync_int_start = time_us;
 #endif
 
     size_t cur_job;
     _mm_sfence();
 
     if (!tasvir_barrier_wait()) {
-        // LOG_DBG("barrier entry failed");
-        ttld.tdata->in_sync = false;
 #ifdef TASVIR_DAEMON
         ttld.ndata->stats_cur.failure++;
-        ttld.ndata->last_sync_int_end = ttld.tdata->update_us;
+        uint64_t time_us_end = tasvir_gettime_us();
+        ttld.ndata->last_sync_int_end = time_us_end;
+        ttld.ndata->stats_cur.sync_barrier_us += time_us_end - time_us;
+        ttld.ndata->stats_cur.sync_us += time_us_end - time_us;
 #endif
+        // LOG_DBG("barrier entry failed");
         return -1;
     }
 
 #ifdef TASVIR_DAEMON
+    ttld.ndata->stats_cur.sync_barrier_us += tasvir_gettime_us() - time_us;
     /* special case for syncing root desc because it is an orphan */
     /* FIXME: what if root is external? check address mapping when d owner is external */
     /* FIXME: no internal log to capture root desc changes? */
@@ -341,18 +359,17 @@ int tasvir_sync_internal() {
     } while (!done);
 
     _mm_sfence();
-    ttld.tdata->update_us = tasvir_gettime_us();
+    ttld.tdata->time_us = tasvir_gettime_us();
 
 #ifdef TASVIR_DAEMON
     for (cur_job = 0; cur_job < ttld.ndata->nr_jobs; cur_job++) {
-        ttld.ndata->stats_cur.total_syncbytes += ttld.ndata->jobs[cur_job].bytes_updated;
+        ttld.ndata->stats_cur.sync_bytes += ttld.ndata->jobs[cur_job].bytes_updated;
     }
-    ttld.ndata->time_us = ttld.tdata->update_us;
-    ttld.ndata->last_sync_int_end = ttld.tdata->update_us;
+    ttld.ndata->time_us = ttld.tdata->time_us;
+    ttld.ndata->last_sync_int_end = ttld.tdata->time_us;
     ttld.ndata->stats_cur.success++;
-    ttld.ndata->stats_cur.total_synctime_us += ttld.tdata->update_us - time_us;
+    ttld.ndata->stats_cur.sync_us += ttld.tdata->time_us - time_us;
 #endif
 
-    ttld.tdata->in_sync = false;
     return 0;
 }

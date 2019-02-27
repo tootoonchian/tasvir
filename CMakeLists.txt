@@ -34,14 +34,12 @@ set(TASVIR_COMPILE_OPTIONS
     -Wall -Wextra -pedantic
     -march=native
     -D_GNU_SOURCE=1
-    -fno-tree-loop-distribute-patterns
-    -fno-semantic-interposition
     -fvisibility=hidden
     -flto
     $<$<COMPILE_LANGUAGE:C>:-D_POSIX_C_SOURCE=200809L>
     $<$<COMPILE_LANGUAGE:CXX>:-fno-rtti>
     $<$<COMPILE_LANGUAGE:CXX>:-D__STDC_LIMIT_MACROS>
-    $<$<C_COMPILER_ID:GNU>:-fdiagnostics-color=always>
+    $<$<C_COMPILER_ID:GNU>:-fno-tree-loop-distribute-patterns -fno-semantic-interposition -fdiagnostics-color=always>
     $<$<C_COMPILER_ID:Clang>:-fcolor-diagnostics -Wno-gnu-zero-variadic-macro-arguments>
     -Ofast
     )
@@ -105,3 +103,4 @@ endmacro(add_tasvir_exec)
 #endmacro(add_tasvir_instrumented_exec)
 
 add_subdirectory(apps)
+add_subdirectory(doc)

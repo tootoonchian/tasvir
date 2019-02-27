@@ -34,7 +34,7 @@ protected:
             diff = 0;
 
         const auto &n_coords = model->NumCoordinates();
-        tasvir_log_write(&model->Data(index, 0, false), sizeof(double) * n_coords);
+        tasvir_log(&model->Data(index, 0, false), sizeof(double) * n_coords);
         for (int j = 0; j < n_coords; j++) {
             model->Data(index, j, false) -= FLAGS_learning_rate * diff * sum_gradients[index][j] / datapoints.size();
         }

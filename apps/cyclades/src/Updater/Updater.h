@@ -53,7 +53,7 @@ protected:
         int n_coords = model->NumCoordinates();
         for (const auto &c : datapoint.GetCoordinates()) {
             const auto &mu = Mu(c);
-            tasvir_log_write(&model->Data(c, 0, false), sizeof(double) * n_coords);
+            tasvir_log(&model->Data(c, 0, false), sizeof(double) * n_coords);
             for (int j = 0; j < n_coords; j++)
                 model->Data(c, j, false) = (1 - mu) * model->Data(c, j, false) - Nu(c, j) + H(c, j);
         }
@@ -69,7 +69,7 @@ protected:
         double mu = Mu(index);
         if (mu != 0)
             geom_sum = ((1 - pow(1 - mu, diff + 1)) / (1 - (1 - mu))) - 1;
-        tasvir_log_write(&model->Data(index, 0, false), sizeof(double) * n_coords);
+        tasvir_log(&model->Data(index, 0, false), sizeof(double) * n_coords);
         for (int j = 0; j < n_coords; j++)
             model->Data(index, j, false) =
                 pow(1 - mu, diff) * model->Data(index, j, false) - Nu(index, j) * geom_sum;

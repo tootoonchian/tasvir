@@ -44,8 +44,8 @@ protected:
     void ApplyWordEmbeddingsGradient(const Datapoint &datapoint) {
         const auto &c = datapoint.GetCoordinates();
         const auto &n_coords = model->NumCoordinates();
-        tasvir_log_write(&model->Data(c[0], 0, false), sizeof(double) * n_coords);
-        tasvir_log_write(&model->Data(c[1], 0, false), sizeof(double) * n_coords);
+        tasvir_log(&model->Data(c[0], 0, false), sizeof(double) * n_coords);
+        tasvir_log(&model->Data(c[1], 0, false), sizeof(double) * n_coords);
         for (int i = 0; i < model->NumCoordinates(); i++) {
             double final_grad = -(2 * gradient.coeffs[0] * (model->Data(c[0], i, false) + model->Data(c[1], i, false)));
             model->Data(c[0], i, false) -= FLAGS_learning_rate * final_grad;

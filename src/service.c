@@ -18,7 +18,7 @@ static void tasvir_service_msg_rpc_request(tasvir_msg_rpc *m) {
     m->h.dst_tid = m->h.src_tid;
     m->h.src_tid = ttld.thread ? ttld.thread->tid : ttld.ndata->nodecast_tid;
     m->h.type = TASVIR_MSG_TYPE_RPC_RESPONSE;
-    /* receiver compares time_us with update_us of the area to ensure it includes the updates due to this msg */
+    /* receiver compares time_us with time_us of the area to ensure it includes the updates due to this msg */
     m->h.time_us = ttld.ndata->time_us;
 
     if (tasvir_service_msg((tasvir_msg *)m, TASVIR_MSG_SRC_ME) != 0) {
@@ -44,7 +44,7 @@ static inline void tasvir_service_msg_mem(tasvir_msg_mem *m) {
     }
     if (m->last && !m->addr)
         return;
-    tasvir_log_write(m->addr, m->len);
+    tasvir_log(m->addr, m->len);
     tasvir_mov_blocks_stream(tasvir_data2shadow(m->addr), m->line, m->len);
     /* write to both versions because no sync while booting non-root daemon */
     if (unlikely(!ttld.thread || ttld.ndata->tdata[TASVIR_THREAD_DAEMON_IDX].state == TASVIR_THREAD_STATE_BOOTING)) {
@@ -134,8 +134,8 @@ static inline void tasvir_service_port_rx() {
     while ((retval = rte_eth_rx_burst(ttld.ndata->port_id, 0, (struct rte_mbuf **)m, TASVIR_PKT_BURST)) > 0) {
         for (i = 0; i < retval; i++) {
             if (m[i]->eh.ether_type == rte_cpu_to_be_16(TASVIR_ETH_PROTO)) {
-                ttld.ndata->stats_cur.total_bytes_rx += m[i]->mbuf.pkt_len;
-                ttld.ndata->stats_cur.total_pkts_rx++;
+                ttld.ndata->stats_cur.rx_bytes += m[i]->mbuf.pkt_len;
+                ttld.ndata->stats_cur.rx_pkts++;
 
                 if (is_same_ether_addr(&m[i]->eh.d_addr, &ttld.ndata->mac_addr)) {
                     tasvir_service_msg(m[i], TASVIR_MSG_SRC_NET2US);
@@ -229,10 +229,10 @@ int tasvir_service() {
     tasvir_service_ring(ttld.tdata->ring_rx);
 #endif
     // FIXME: correctness issue unless tsc is in sync (due to constant tsc feature)
-    ttld.tdata->update_us = tasvir_gettime_us();
-    // ttld.tdata->update_us = ttld.ndata->time_us;
+    ttld.tdata->time_us = tasvir_gettime_us();
+    // ttld.tdata->time_us = ttld.ndata->time_us;
 
-    if (ttld.thread && ttld.tdata->do_sync) {
+    if (ttld.thread && ttld.tdata->next_sync_seq != ttld.tdata->prev_sync_seq) {
         return tasvir_sync_internal();
     }
 

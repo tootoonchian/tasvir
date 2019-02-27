@@ -27,7 +27,7 @@ public:
     void Barrier() {
         std::size_t wid;
         _done = _version;
-        tasvir_log_write(&_done, sizeof(_done));
+        tasvir_log(&_done, sizeof(_done));
         tasvir_service_wait();
 
         if (_tid == 0) {
@@ -36,8 +36,8 @@ public:
                     tasvir_service();
             _master->_done = _master->_version;
             _master->_version++;
-            tasvir_log_write(&_master->_done, sizeof(_done));
-            tasvir_log_write(&_master->_version, sizeof(_version));
+            tasvir_log(&_master->_done, sizeof(_done));
+            tasvir_log(&_master->_version, sizeof(_version));
         }
 
         /* block until master changes version */
@@ -45,7 +45,7 @@ public:
             tasvir_service();
 
         _version = _master->_version;
-        tasvir_log_write(&_version, sizeof(_version));
+        tasvir_log(&_version, sizeof(_version));
     }
 
     inline T* Select() { return NULL; }

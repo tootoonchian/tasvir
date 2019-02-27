@@ -22,35 +22,29 @@ void tasvir_stats_update() {
     rte_eth_stats_get(0, &s);
 
     LOG_INFO(
-        "sync=%lu/s,%lu/s sync_t=%.1f%%,%luus/sync change=%luKB/s,%luKB/sync "
+        "sync=+%lu/s,-%lu/s sync_t=%.1f%%,%luus/sync change=%luKB/s,%luKB/sync "
         "\n                                        "
         "rx=%luKB/s,%luKpps tx=%luKB/s,%luKpps "
         "(ipkts=%lu ibytes=%lu ierr=%lu imiss=%lu inombuf=%lu"
         ",opkts=%lu obytes=%lu oerr=%lu)",
-        S * cur->success / interval_us, S * cur->failure / interval_us, 100. * cur->total_synctime_us / interval_us,
-        cur->success > 0 ? cur->total_synctime_us / cur->success : 0, MS * cur->total_syncbytes / interval_us,
-        cur->success > 0 ? cur->total_syncbytes / 1000 / cur->success : 0, MS * cur->total_bytes_rx / interval_us,
-        MS * cur->total_pkts_rx / interval_us, MS * cur->total_bytes_tx / interval_us,
-        MS * cur->total_pkts_tx / interval_us, s.ipackets, s.ibytes, s.ierrors, s.imissed, s.rx_nombuf, s.opackets,
+        S * cur->success / interval_us, S * cur->failure / interval_us, 100. * cur->sync_us / interval_us,
+        cur->success > 0 ? cur->sync_us / cur->success : 0, MS * cur->sync_bytes / interval_us,
+        cur->success > 0 ? cur->sync_bytes / 1000 / cur->success : 0, MS * cur->rx_bytes / interval_us,
+        MS * cur->rx_pkts / interval_us, MS * cur->tx_bytes / interval_us,
+        MS * cur->tx_pkts / interval_us, s.ipackets, s.ibytes, s.ierrors, s.imissed, s.rx_nombuf, s.opackets,
         s.obytes, s.oerrors);
 
     avg->success += cur->success;
     avg->failure += cur->failure;
-    avg->total_synctime_us += cur->total_synctime_us;
-    avg->total_syncbytes += cur->total_syncbytes;
-    avg->total_bytes_rx += cur->total_bytes_rx;
-    avg->total_pkts_rx += cur->total_pkts_rx;
-    avg->total_bytes_tx += cur->total_bytes_rx;
-    avg->total_pkts_tx += cur->total_pkts_rx;
+    avg->sync_barrier_us += cur->sync_barrier_us;
+    avg->sync_us += cur->sync_us;
+    avg->sync_bytes += cur->sync_bytes;
+    avg->rx_bytes += cur->rx_bytes;
+    avg->rx_pkts += cur->rx_pkts;
+    avg->tx_bytes += cur->rx_bytes;
+    avg->tx_pkts += cur->rx_pkts;
 
-    cur->success = 0;
-    cur->failure = 0;
-    cur->total_synctime_us = 0;
-    cur->total_syncbytes = 0;
-    cur->total_bytes_rx = 0;
-    cur->total_pkts_rx = 0;
-    cur->total_bytes_tx = 0;
-    cur->total_pkts_tx = 0;
+    memset(cur, 0, sizeof(*cur));
     // tasvir_walk_areas(ttld.root_desc, &tasvir_print_area);
 }
 #endif

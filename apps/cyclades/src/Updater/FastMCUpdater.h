@@ -46,8 +46,8 @@ protected:
         const auto &movie_coordinate = c[1];
         const auto &n_coords = model->NumCoordinates();
 
-        tasvir_log_write(&model->Data(user_coordinate, 0, false), sizeof(double) * n_coords);
-        tasvir_log_write(&model->Data(movie_coordinate, 0, false), sizeof(double) * n_coords);
+        tasvir_log(&model->Data(user_coordinate, 0, false), sizeof(double) * n_coords);
+        tasvir_log(&model->Data(movie_coordinate, 0, false), sizeof(double) * n_coords);
         for (int i = 0; i < n_coords; i++) {
             double new_user_value = model->Data(user_coordinate, i, false) -
                                     FLAGS_learning_rate * g_coeff * model->Data(movie_coordinate, i, false);

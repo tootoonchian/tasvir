@@ -107,15 +107,12 @@ typedef enum {
 // static const char *tasvir_msg_src_str[] = {"invalid", "me", "local", "net2us", "net2root"};
 
 struct tasvir_local_tdata { /* thread data */
-    uint64_t update_us;
+    uint64_t time_us;
     struct rte_ring *ring_tx;
     struct rte_ring *ring_rx;
     tasvir_thread_state state;
-    int sync_seq;
-    struct {
-        bool do_sync; /* only updated by daemon */
-        bool in_sync; /* only updated by thread */
-    };
+    size_t prev_sync_seq; /* prev sync sequence number. updated by thread only. */
+    size_t next_sync_seq; /* next sync sequence number. updated by daemon only. */
 } __attribute__((aligned(8)));
 
 struct tasvir_sync_job {
@@ -135,8 +132,8 @@ struct tasvir_local_ndata { /* node data */
     struct rte_mempool *mp;
 
     uint64_t barrier_end_tsc;
-    atomic_int barrier_entry;
-    atomic_int barrier_seq;
+    atomic_size_t barrier_cnt;
+    atomic_size_t barrier_seq;
     pthread_mutex_t mutex_init;
     struct rte_ring *ring_ext_tx;
 
@@ -314,39 +311,6 @@ __attribute__((unused)) static inline void tasvir_hexdump(void *addr, size_t len
     fprintf(stderr, "\n");
 }
 
-static inline void tasvir_kill_thread_ownership(tasvir_thread *t, tasvir_area_desc *d) {
-    if (d->type == TASVIR_AREA_TYPE_CONTAINER) {
-        tasvir_area_desc *c = tasvir_data(d);
-        for (size_t i = 0; i < d->h->nr_areas; i++)
-            tasvir_kill_thread_ownership(t, &c[i]);
-    }
-    if (d->owner == t)
-        tasvir_update_owner(d, ttld.thread);
-}
-
-/* caller contract: is_daemon and tasvir_is_thread_local(t) */
-static inline void tasvir_kill_thread(tasvir_thread *t) {
-    tasvir_local_tdata *tdata = &ttld.ndata->tdata[t->tid.idx];
-    LOG_INFO("tid=%d inactive_time=%zd", t->tid.idx, ttld.ndata->time_us - tdata->update_us);
-    tdata->update_us = 0;
-    tdata->do_sync = false;
-    tdata->state = TASVIR_THREAD_STATE_DEAD;
-    rte_ring_free(tdata->ring_rx);
-    rte_ring_free(tdata->ring_tx);
-    tdata->ring_rx = NULL;
-    tdata->ring_tx = NULL;
-
-    /* change ownership */
-    tasvir_kill_thread_ownership(t, ttld.root_desc);
-
-    /* kill by pid */
-    kill(t->tid.pid, SIGKILL);
-
-    // FIXME: node_desc must deactivate
-    t->active = false;
-    tasvir_log_write(&t->active, sizeof(t->active));
-}
-
 static inline void tasvir_tid2str(tasvir_tid tid, size_t buf_size, char *buf) {
     ether_format_addr(buf, buf_size, &tid.nid.mac_addr);
     snprintf(&buf[strlen(buf)], buf_size - strlen(buf), ":%d", tid.idx);
@@ -416,13 +380,13 @@ static inline void tasvir_populate_msg_nethdr(tasvir_msg *m) {
     m->eh.ether_type = rte_cpu_to_be_16(TASVIR_ETH_PROTO);
 
     // FIXME: not all will be sent out
-    ttld.ndata->stats_cur.total_bytes_tx += m->mbuf.pkt_len;
-    ttld.ndata->stats_cur.total_pkts_tx++;
+    ttld.ndata->stats_cur.tx_bytes += m->mbuf.pkt_len;
+    ttld.ndata->stats_cur.tx_pkts++;
 }
 
 __attribute__((unused)) static inline void tasvir_print_area(tasvir_area_desc *d) {
-    LOG_DBG("name=%s owner=%p version=%lu update_us=%lu", d->name, (void *)d->owner, d->h ? d->h->version : 0,
-            d->h ? d->h->update_us : 0);
+    LOG_DBG("name=%s owner=%p version=%lu time_us=%lu", d->name, (void *)d->owner, d->h ? d->h->version : 0,
+            d->h ? d->h->time_us : 0);
 }
 
 static inline void tasvir_print_msg(tasvir_msg *m, bool is_src_me, bool is_dst_me) {

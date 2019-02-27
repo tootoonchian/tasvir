@@ -44,7 +44,7 @@ private:
 
         // Set elements in model to be a random number in range.
         if (FLAGS_wid == 0) {
-            tasvir_log_write(&Data(0, true), sizeof(double) * NumParameters() * NumCoordinates());
+            tasvir_log(&Data(0, true), sizeof(double) * NumParameters() * NumCoordinates());
             for (int i = 0; i < NumParameters(); i++) {
                 Data(i, true) = rand() % FLAGS_random_range;
             }
@@ -171,7 +171,7 @@ public:
         size_t index_lo = FLAGS_wid * batch_size;
         size_t index_hi = std::min(nr_datapoints, index_lo + batch_size);
 
-        tasvir_log_write(&_loss->DataWorker()[0], sizeof(double));
+        tasvir_log(&_loss->DataWorker()[0], sizeof(double));
         _loss->DataWorker()[0] = 0;
         for (size_t i = index_lo; i < index_hi; i++) {
             const auto &labels = datapoints[i]->GetWeights();

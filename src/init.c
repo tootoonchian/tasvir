@@ -41,8 +41,8 @@ static int tasvir_init_local() {
     pthread_mutex_init(&ttld.ndata->mutex_init, &mutex_attr);
     pthread_mutexattr_destroy(&mutex_attr);
     ttld.ndata->barrier_end_tsc = 0;
-    atomic_store(&ttld.ndata->barrier_entry, -1);
-    atomic_store(&ttld.ndata->barrier_seq, 0);
+    atomic_store(&ttld.ndata->barrier_cnt, -1);
+    atomic_store(&ttld.ndata->barrier_seq, 1);
 
     /* mempool */
     ttld.ndata->mp = rte_pktmbuf_pool_create("mempool", TASVIR_MBUF_POOL_SIZE, TASVIR_MBUF_CORE_CACHE_SIZE, 0,
@@ -142,7 +142,7 @@ static int tasvir_init_node() {
     ttld.node->heartbeat_us = TASVIR_HEARTBEAT_US;
 
     /* time */
-    tasvir_log_write(ttld.node, sizeof(tasvir_node));
+    tasvir_log(ttld.node, sizeof(tasvir_node));
 #else
     ttld.node_desc = tasvir_attach_wait(ttld.root_desc, name, NULL, false, 500 * MS2US);
     if (!ttld.node_desc || !ttld.node_desc->h->active) {
@@ -158,9 +158,9 @@ static int tasvir_init_node() {
     if (!ttld.node_desc->active) {
         LOG_ERR("daemon is inactive");
         return -1;
-    } else if (time_us > daemon_tdata->update_us && time_us - daemon_tdata->update_us > ttld.node_desc->sync_int_us) {
-        LOG_ERR("daemon has been stale for %lu us (> %lu), last activity %lu", time_us - ttld.node_desc->h->update_us,
-                ttld.node_desc->sync_int_us, ttld.node_desc->h->update_us);
+    } else if (time_us > daemon_tdata->time_us && time_us - daemon_tdata->time_us > ttld.node_desc->sync_int_us) {
+        LOG_ERR("daemon has been stale for %lu us (> %lu), last activity %lu", time_us - ttld.node_desc->h->time_us,
+                ttld.node_desc->sync_int_us, ttld.node_desc->h->time_us);
         return -1;
     }
 #endif
@@ -185,13 +185,15 @@ tasvir_thread *tasvir_init_thread(pid_t pid, uint16_t core) {
 
     /* populate thread */
     t = &ttld.node->threads[tid];
+    memset(t, 0, sizeof(*t));
     t->core = core;
     t->tid.nid = ttld.node->nid;
     t->tid.idx = tid;
     t->tid.pid = pid;
-    tasvir_log_write(t, sizeof(tasvir_thread));
+    tasvir_log(t, sizeof(*t));
 
     tasvir_local_tdata *tdata = &ttld.ndata->tdata[tid];
+    memset(tdata, 0, sizeof(*tdata));
     tasvir_str tmp;
     /* rings */
     sprintf(tmp, "tasvir_tx_%d", tid);
@@ -228,15 +230,15 @@ int tasvir_init_finish(tasvir_thread *t) {
 
 #ifdef TASVIR_DAEMON
     t->active = true;
-    tasvir_log_write(&t->active, sizeof(t->active));
+    tasvir_log(&t->active, sizeof(t->active));
 
     /* backfill area owners */
     if (t == ttld.thread) {
         if (ttld.is_root) {
             ttld.node_desc->owner = ttld.thread;
             ttld.root_desc->owner = ttld.thread;
-            tasvir_log_write(&ttld.node_desc->owner, sizeof(ttld.node_desc->owner));
-            tasvir_log_write(&ttld.root_desc->owner, sizeof(ttld.root_desc->owner));
+            tasvir_log(&ttld.node_desc->owner, sizeof(ttld.node_desc->owner));
+            tasvir_log(&ttld.root_desc->owner, sizeof(ttld.root_desc->owner));
         } else if (!tasvir_update_owner(ttld.node_desc, ttld.thread)) {
             return -1;
         }

@@ -14,6 +14,7 @@
 #include <type_traits>
 
 #include <tasvir/tasvir.h>
+#include <tasvir/array.hpp>
 
 using namespace std;
 
@@ -56,8 +57,10 @@ struct benchmark_cfg {
         uint64_t nr_writes;
         uint64_t runtime_1m_us;
         uint64_t runtime_us;
-        uint64_t synctime_1m_us;
-        uint64_t synctime_us;
+        uint64_t barr_1m_us;
+        uint64_t barr_us;
+        uint64_t sync_1m_us;
+        uint64_t sync_us;
         uint64_t sync_bytes;
         uint64_t write_xput_mbps;
     } stats[2][2][2][2];
@@ -136,6 +139,19 @@ static inline void store_novec(void *dst, void *src, size_t len) {
     } while (dst < dst_end);
 }
 
+template <bool random, int n>
+static inline typename enable_if<n == 0, void>::type next_read(const void *, uint64_t, int) {}
+
+template <bool random, int n>
+static inline typename enable_if<n != 0, void>::type next_read(const void *s, uint64_t mask, int stride) {
+    size_t offset = next_masked<random>(mask, stride);
+    s = (uint8_t *)s + offset;
+
+    // volatile tasvir_stream_vec_rep(d, s, stride);
+
+    next_read<random, n - 1>(s, mask, stride);
+}
+
 template <bool do_log, bool do_stream, bool random, int n>
 static inline typename enable_if<n == 0, void>::type next_write(void *, const void *, uint64_t, int) {}
 
@@ -154,10 +170,10 @@ static inline typename enable_if<n != 0, void>::type next_write(void *d, const v
     next_write<do_log, do_stream, random, n - 1>(d, s, mask, stride);
 
     if (do_log)
-        tasvir_log_write(d, stride);
+        tasvir_log(d, stride);
 
     if (false) {
-        // tasvir_log_write2(d, stride);
+        // tasvir_log2(d, stride);
         // tasvir_log_t *log_addr = (tasvir_log_t *)((uintptr_t)tasvir_data2logunit(d) & ~31L);
         // _mm_stream_pi((__m64 *)TASVIR_ADDR_LOG, (__m64)0UL);
         // *(uint64_t *)TASVIR_ADDR_LOG = n;
@@ -220,13 +236,15 @@ typename enable_if<round == 0, void>::type experiment(benchmark_cfg *cfg) {
     s.nr_sync_fails /= cfg->nr_rounds;
     s.nr_writes /= cfg->nr_rounds;
     s.runtime_us /= cfg->nr_rounds;
-    s.synctime_us /= cfg->nr_rounds;
+    s.barr_us /= cfg->nr_rounds;
+    s.sync_us /= cfg->nr_rounds;
     s.sync_bytes /= cfg->nr_rounds;
     s.runtime_1m_us = 1E6 * s.runtime_us / s.nr_writes;
-    s.synctime_1m_us = 1E6 * s.synctime_us / s.nr_writes;
+    s.barr_1m_us = 1E6 * s.barr_us / s.nr_writes;
+    s.sync_1m_us = 1E6 * s.sync_us / s.nr_writes;
     s.write_xput_mbps = cfg->stride * s.nr_writes / s.runtime_us;
 
-    fprintf(stderr, "\n");
+    printf("\n");
 }
 
 template <int round, int argid, int write_batch>
@@ -252,7 +270,7 @@ typename enable_if<round != 0 && argid >= 0, void>::type __attribute__((noinline
         cfg->this_run.nr_writes_per_service = nr_test_writes * cfg->service_us / (double)t;
     }
 
-    fprintf(stderr, "round=%d stream=%d random=%d log=%d service=%d : ", round, do_stream, random, do_log, do_service);
+    printf("round=%d stream=%d random=%d log=%d service=%d : ", round, do_stream, random, do_log, do_service);
 
     tasvir_service_wait(1000 * 1000);
     flush_cache();
@@ -273,19 +291,17 @@ typename enable_if<round != 0 && argid >= 0, void>::type __attribute__((noinline
     t = tasvir_tsc2usec(tasvir_rdtsc() - t);
     tasvir_stats ts = tasvir_stats_get();
     asm volatile("" ::: "memory");
-    fprintf(
-        stderr,
-        " runtime_ms=%4ld nr_writes_k=%6ld sync_success=%4ld sync_failure=%4ld sync_time_ms=%4ld sync_size_kb=%8ld\n",
-        t / 1000, cfg->this_run.nr_writes / 1000, ts.success, ts.failure, ts.total_synctime_us / 1000,
-        ts.total_syncbytes / 1000);
+    printf("runtime_ms=%5ld nr_writes_k=%6ld sync_success=%5ld sync_failure=%5ld sync_time_ms=%5ld sync_size_kb=%8ld\n",
+           t / 1000, cfg->this_run.nr_writes / 1000, ts.success, ts.failure, ts.sync_us / 1000, ts.sync_bytes / 1000);
 
     auto &s = cfg->stats[do_stream][random][do_log][do_service];
     s.nr_syncs += ts.success;
     s.nr_sync_fails += ts.failure;
     s.nr_writes += cfg->this_run.nr_writes;
     s.runtime_us += t;
-    s.synctime_us += ts.total_synctime_us;
-    s.sync_bytes += ts.total_syncbytes;
+    s.barr_us += ts.sync_barrier_us;
+    s.sync_us += ts.sync_us;
+    s.sync_bytes += ts.sync_bytes;
 
     experiment<round - 1, argid, write_batch>(cfg);
     if (round == cfg->nr_rounds)
@@ -324,6 +340,7 @@ int init(benchmark_cfg *cfg) {
                 fprintf(stderr, "tasvir_new %s failed\n", param.name);
                 return -1;
             }
+            memset(tasvir_data(d), 0, d->len); /* to ensure reservation */
         } else {
             tasvir_str name;
             snprintf(name, sizeof(name), "benchmark-%d", i);
@@ -335,9 +352,8 @@ int init(benchmark_cfg *cfg) {
     }
 
     if (d) {
-        cfg->data = (uint8_t *)(((uintptr_t)tasvir_data(d) + TASVIR_VEC_BYTES) & ~(TASVIR_VEC_BYTES - 1));
-        memset(cfg->data, 0, cfg->area_len);
-        // tasvir_log_write(cfg->data, cfg->area_len);
+        auto alignment = TASVIR_VEC_BYTES;
+        cfg->data = (uint8_t *)(((uintptr_t)tasvir_data(d) + alignment - 1) & ~(alignment - 1));
         return 0;
     } else {
         service_loop();
@@ -423,35 +439,36 @@ int main(int argc, char **argv) {
     if (init(&cfg) != 0)
         return -1;
 
-    fprintf(stderr, "cmdline: ");
+    printf("cmdline: ");
     for (int i = 0; i < argc; i++)
-        fprintf(stderr, "%s ", argv[i]);
-    fprintf(stderr,
-            "\n"
-            "RUNS cpu=%d-%d wid=%d core=%d nr_workers=%d nr_writers=%d service_us=%d "
-            "area_len_kb=%lu stride_b=%d sync_int_us=%lu sync_ext_us=%lu\n",
-            family, model, cfg.wid, cfg.core, cfg.nr_workers, cfg.nr_writers, cfg.service_us, cfg.area_len / 1024,
-            cfg.stride, cfg.sync_int_us, cfg.sync_ext_us);
+        printf("%s ", argv[i]);
+    printf(
+        "\nRUNS cpu=%d-%d wid=%d core=%d nr_workers=%d nr_writers=%d service_us=%d "
+        "area_len_kb=%lu stride_b=%d sync_int_us=%lu sync_ext_us=%lu\n",
+        family, model, cfg.wid, cfg.core, cfg.nr_workers, cfg.nr_writers, cfg.service_us, cfg.area_len / 1024,
+        cfg.stride, cfg.sync_int_us, cfg.sync_ext_us);
 
-    experiment<nr_rounds, 15, write_batch>(&cfg);
+    experiment<nr_rounds, 7, write_batch>(&cfg);
 
-    for (int do_stream = 1; do_stream >= 0; do_stream--) {
+    for (int do_stream = 0; do_stream >= 0; do_stream--) {
         for (int random = 1; random >= 0; random--) {
-            uint64_t diff_log = diff_pos(cfg.stats[do_stream][random][1][0].runtime_1m_us,
-                                         cfg.stats[do_stream][random][0][0].runtime_1m_us);
-            uint64_t diff_noop = diff_pos(cfg.stats[do_stream][random][0][1].runtime_1m_us,
-                                          cfg.stats[do_stream][random][0][0].runtime_1m_us);
-            uint64_t diff_full = diff_pos(cfg.stats[do_stream][random][1][1].runtime_1m_us,
-                                          cfg.stats[do_stream][random][0][0].runtime_1m_us);
+            double overhead_isync_noop =
+                100. * cfg.stats[do_stream][random][0][1].sync_1m_us / cfg.stats[do_stream][random][0][0].runtime_1m_us;
+            double overhead_isync_full =
+                100. * cfg.stats[do_stream][random][1][1].sync_1m_us / cfg.stats[do_stream][random][0][0].runtime_1m_us;
 
-            double overhead_isync_noop = 100. * cfg.stats[do_stream][random][0][1].synctime_1m_us /
-                                         cfg.stats[do_stream][random][0][0].runtime_1m_us;
-            double overhead_isync_full = 100. * cfg.stats[do_stream][random][1][1].synctime_1m_us /
-                                         cfg.stats[do_stream][random][0][0].runtime_1m_us;
-
-            double overhead_log = 100. * diff_log / cfg.stats[do_stream][random][0][0].runtime_1m_us;
-            double overhead_noop = 100. * diff_noop / cfg.stats[do_stream][random][0][0].runtime_1m_us;
-            double overhead_full = 100. * diff_full / cfg.stats[do_stream][random][0][0].runtime_1m_us;
+            double overhead_log = 100. *
+                                  diff_pos(cfg.stats[do_stream][random][1][0].runtime_1m_us,
+                                           cfg.stats[do_stream][random][0][0].runtime_1m_us) /
+                                  cfg.stats[do_stream][random][0][0].runtime_1m_us;
+            double overhead_noop = 100. *
+                                   diff_pos(cfg.stats[do_stream][random][0][1].runtime_1m_us,
+                                            cfg.stats[do_stream][random][0][0].runtime_1m_us) /
+                                   cfg.stats[do_stream][random][0][0].runtime_1m_us;
+            double overhead_full = 100. *
+                                   diff_pos(cfg.stats[do_stream][random][1][1].runtime_1m_us,
+                                            cfg.stats[do_stream][random][0][0].runtime_1m_us) /
+                                   cfg.stats[do_stream][random][0][0].runtime_1m_us;
 
             double overhead_serv = overhead_noop - overhead_isync_noop;
             if (overhead_serv < 0)
@@ -459,38 +476,50 @@ int main(int argc, char **argv) {
             double overhead_direct = overhead_log + overhead_isync_full + overhead_serv;
             double overhead_indirect = overhead_full - overhead_direct;
 
-            double sync_xput_mbps =
-                cfg.stats[do_stream][random][1][1].sync_bytes / cfg.stats[do_stream][random][1][1].synctime_us;
-            double sync_write_pcnt = 100. * cfg.stats[do_stream][random][1][1].sync_bytes /
-                                     (cfg.stats[do_stream][random][1][1].nr_writes * cfg.stride);
+            double isync_xput_mbps =
+                cfg.stats[do_stream][random][1][1].sync_bytes / cfg.stats[do_stream][random][1][1].sync_us;
+            double isync_xput_per_core_mbps = isync_xput_mbps / (cfg.nr_workers + 1);
+            double isync_xput_per_call_mbps = isync_xput_mbps / cfg.stats[do_stream][random][1][1].nr_syncs;
+            double isync_write_pcnt = 100. * cfg.stats[do_stream][random][1][1].sync_bytes /
+                                      (cfg.stats[do_stream][random][1][1].nr_writes * cfg.stride);
+            double isync_time_barr_per_call_us =
+                (double)cfg.stats[do_stream][random][0][1].barr_us / cfg.stats[do_stream][random][0][1].nr_syncs;
+            double isync_time_noop_per_call_us =
+                (double)cfg.stats[do_stream][random][0][1].sync_us / cfg.stats[do_stream][random][0][1].nr_syncs;
+            double isync_time_full_per_call_us =
+                (double)cfg.stats[do_stream][random][1][1].sync_us / cfg.stats[do_stream][random][1][1].nr_syncs;
 
-            fprintf(stderr,
-                    "RESULTS cpu=%d-%d wid=%d core=%d nr_workers=%d nr_writers=%d service_us=%d "
-                    "area_len_kb=%lu stride_b=%d sync_int_us=%lu sync_ext_us=%lu stream=%d random=%d\n",
-                    family, model, cfg.wid, cfg.core, cfg.nr_workers, cfg.nr_writers, cfg.service_us,
-                    cfg.area_len / 1024, cfg.stride, cfg.sync_int_us, cfg.sync_ext_us, do_stream, random);
+            printf(
+                "RESULTS cpu=%d-%d wid=%d core=%d nr_workers=%d nr_writers=%d service_us=%d "
+                "area_len_kb=%lu stride_b=%d sync_int_us=%lu sync_ext_us=%lu stream=%d random=%d\n",
+                family, model, cfg.wid, cfg.core, cfg.nr_workers, cfg.nr_writers, cfg.service_us, cfg.area_len / 1024,
+                cfg.stride, cfg.sync_int_us, cfg.sync_ext_us, do_stream, random);
 
             for (int do_log = 0; do_log <= 1; do_log++)
                 for (int do_service = 0; do_service <= 1; do_service++)
-                    fprintf(stderr, "      runtime_1m_l%ds%d_us=%8lu\n", do_log, do_service,
-                            cfg.stats[do_stream][random][do_log][do_service].runtime_1m_us);
+                    printf("          runtime_1m_l%ds%d_us=%8lu\n", do_log, do_service,
+                           cfg.stats[do_stream][random][do_log][do_service].runtime_1m_us);
 
             for (int do_log = 0; do_log <= 1; do_log++)
                 for (int do_service = 0; do_service <= 1; do_service++)
-                    fprintf(stderr, "    write_xput_l%ds%d_mbps=%8lu\n", do_log, do_service,
-                            cfg.stats[do_stream][random][do_log][do_service].write_xput_mbps);
+                    printf("        write_xput_l%ds%d_mbps=%8lu\n", do_log, do_service,
+                           cfg.stats[do_stream][random][do_log][do_service].write_xput_mbps);
 
-            fprintf(stderr, "%24s=%8.2f\n", "sync_xput_mbps", sync_xput_mbps);
-            fprintf(stderr, "%24s=%8.2f\n", "sync_xput_per_core_mbps", sync_xput_mbps / (cfg.nr_workers + 1));
-            fprintf(stderr, "%24s=%8.2f\n", "sync_write_pct", sync_write_pcnt);
-            fprintf(stderr, "%24s=%8.2f\n", "overhead_isync_noop_pct", overhead_isync_noop);
-            fprintf(stderr, "%24s=%8.2f\n", "overhead_isync_full_pct", overhead_isync_full);
-            fprintf(stderr, "%24s=%8.2f\n", "overhead_log_pct", overhead_log);
-            fprintf(stderr, "%24s=%8.2f\n", "overhead_serv_pct", overhead_serv);
-            fprintf(stderr, "%24s=%8.2f\n", "overhead_direct_pct", overhead_direct);
-            fprintf(stderr, "%24s=%8.2f\n", "overhead_indirect_pct", overhead_indirect);
-            fprintf(stderr, "%24s=%8.2f\n", "overhead_full_pct", overhead_full);
-            fprintf(stderr, "\n");
+            printf("%28s=%8.2f\n", "isync_write_pct", isync_write_pcnt);
+            printf("%28s=%8.2f\n", "isync_xput_mbps", isync_xput_mbps);
+            printf("%28s=%8.2f\n", "isync_xput_per_core_mbps", isync_xput_per_core_mbps);
+            printf("%28s=%8.2f\n", "isync_xput_per_call_mbps", isync_xput_per_call_mbps);
+            printf("%28s=%8.2f\n", "isync_time_barr_per_call_us", isync_time_barr_per_call_us);
+            printf("%28s=%8.2f\n", "isync_time_noop_per_call_us", isync_time_noop_per_call_us);
+            printf("%28s=%8.2f\n", "isync_time_full_per_call_us", isync_time_full_per_call_us);
+            printf("%28s=%8.2f\n", "overhead_isync_noop_pct", overhead_isync_noop);
+            printf("%28s=%8.2f\n", "overhead_serv_pct", overhead_serv);
+            printf("%28s=%8.2f\n", "overhead_log_pct", overhead_log);
+            printf("%28s=%8.2f\n", "overhead_isync_full_pct", overhead_isync_full);
+            printf("%28s=%8.2f\n", "overhead_direct_pct", overhead_direct);
+            printf("%28s=%8.2f\n", "overhead_indirect_pct", overhead_indirect);
+            printf("%28s=%8.2f\n", "overhead_full_pct", overhead_full);
+            printf("\n");
         }
     }
 

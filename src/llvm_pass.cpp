@@ -19,7 +19,7 @@ struct TasvirPass : public FunctionPass {
     bool runOnFunction(Function &f) override {
         const DataLayout &layout = f.getParent()->getDataLayout();
         LLVMContext &ctx = f.getContext();
-        Constant *logFunc = f.getParent()->getOrInsertFunction("tasvir_log_write", Type::getVoidTy(ctx), Type::getInt8PtrTy(ctx),
+        Constant *logFunc = f.getParent()->getOrInsertFunction("tasvir_log", Type::getVoidTy(ctx), Type::getInt8PtrTy(ctx),
                                                                Type::getInt64Ty(ctx), NULL);
 
         for (auto &block : f) {

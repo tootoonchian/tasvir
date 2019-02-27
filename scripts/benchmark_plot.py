@@ -100,45 +100,63 @@ def tabulate():
         print("\t", v)
 
 
+def overhead_interval():
+    df = stats_df[['overhead_serv_pct', 'overhead_log_pct', 'overhead_isync_full_pct', 'overhead_indirect_pct']]
+    df = df[(df.stream == 0)].sort_values('area_len_kb')
+    df = df.groupby(['sync_int_us'])
+    print(stats_df.groupby(['area_len_kb'], as_index=False).last()) #.unstack('area_len_kb'))
+    for random, stream, nr_workers, sync_int_us in product([0, 1], [0], [1, 3, 5, 7], [1000, 10000, 100000]):
+
 def overhead():
-    # runid: (round, stream, random, log, service)
-    # result: (time_ms, sync_success, sync_failure, sync_time_ms, sync_size_kb)
     # 'area_len_kb', 'core', 'cpu', 'nr_workers', 'nr_writers', 'overhead_direct_pct', 'overhead_full_pct', 'overhead_indirect_pct', 'overhead_isync_full_pct', 'overhead_isync_noop_pct', 'overhead_log_pct', 'overhead_serv_pct', 'random', 'runtime_1m_l0s0_us', 'runtime_1m_l0s1_us', 'runtime_1m_l1s0_us', 'runtime_1m_l1s1_us', 'service_us', 'stream', 'stride_b', 'sync_ext_us', 'sync_int_us', 'sync_write_pct', 'sync_xput_mbps', 'sync_xput_per_core_mbps', 'wid', 'write_xput_l0s0_mbps', 'write_xput_l0s1_mbps', 'write_xput_l1s0_mbps', 'write_xput_l1s1_mbps'
     # col_n = list(stats_df)
     # print(col_n)
-    #mi = pd.MultiIndex.from_frame(stats_df)
-    #dfr = pd.DataFrame(data=dist, index=index, columns=['df'])
-    #print(data.head())
 
-    # print(stats_df.groupby(['area_len_kb'], as_index=False).last()) #.unstack('area_len_kb'))
-    # return
-    for random, stream, nr_workers, sync_int_us in product([0, 1], [0, 1], [1], [1000, 10000, 100000]):
-    # for random, stream, nr_workers, sync_int_us in product([0, 1], [0, 1], [1, 3, 5, 7], [1000, 10000, 100000]):
+    for random, stream, nr_workers, sync_int_us in product([0, 1], [0], [1, 3, 5, 7], [1000, 10000, 100000]):
         try:
             df = stats_df[(stats_df.random == random) & (stats_df.stream == stream) & (stats_df.nr_workers == nr_workers) & (stats_df.sync_int_us == sync_int_us)].sort_values('area_len_kb')
             title = 'random=%d,stream=%d,nr_workers=%d,sync_int_us=%d' % (random, stream, nr_workers, sync_int_us)
             # p = df.plot.bar(x='area_len_kb', y=['overhead_full_pct'], stacked=True, title=title, ylim=(0, 100))
-            max_val = df[['overhead_serv_pct', 'overhead_log_pct', 'overhead_isync_full_pct', 'overhead_indirect_pct']].max(axis=1).max()
-            max_val = 50 * math.ceil(max_val / 50.)
             with sns.axes_style('white'):
+                for t in ['overhead_serv_pct', 'overhead_log_pct', 'overhead_isync_full_pct', 'overhead_indirect_pct']:
+                    max_val = df[t].max()
+                    max_val = 20 * math.ceil(max_val / 20.)
+                    p = df.plot.bar(x='area_len_kb', y=[t], stacked=False, title=title, ylim=(0, max_val), figsize=(8, 6))
+                    fig = p.get_figure()
+                    fig.tight_layout()
+                    fig.savefig("%s/%s_r%ds%dw%dsi%06d.png" % (out_dir, t, random, stream, nr_workers, sync_int_us))
+                    fig.clf()
+
+                max_val = df[['overhead_serv_pct', 'overhead_log_pct', 'overhead_isync_full_pct', 'overhead_indirect_pct']].max(axis=1).max()
+                max_val = 20 * math.ceil(max_val / 20.)
                 p = df.plot.bar(x='area_len_kb', y=['overhead_serv_pct', 'overhead_log_pct', 'overhead_isync_full_pct', 'overhead_indirect_pct'], stacked=False, title=title, ylim=(0, max_val), figsize=(8, 6))
-                p.get_figure().tight_layout()
-                p.get_figure().savefig("%s/zz.plots/test_r%ds%dw%dsi%06d.png" % (sys.argv[1], random, stream, nr_workers, sync_int_us))
+                fig = p.get_figure()
+                fig.tight_layout()
+                fig.savefig("%s/stacked_r%ds%dw%dsi%06d.png" % (out_dir, random, stream, nr_workers, sync_int_us))
+                fig.clf()
         except Exception as e:
             print('failed for r%ds%dw%d: %s' % (random, stream, nr_workers, e))
-
-    #for isync in [1000, 10000, 100000]:
-    #    for k, v in rmap_stats.items():
+    """
+    df = stats_df[stats_df.overhead_log_pct > 20]
+    df = df[['overhead_serv_pct', 'overhead_log_pct', 'overhead_isync_full_pct', 'overhead_indirect_pct']]
+    max_val = df.max(axis=1).max()
+    with sns.axes_style('white'):
+        ax = sns.heatmap(df, vmin=0, vmax=100)
+        fig = ax.get_figure()
+        fig.tight_layout()
+        fig.savefig('%s/zz.heatmap.png' % out_dir)
+    """
 
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
         print("Usage: %s log_directory" % (sys.argv[0], ))
         sys.exit(1)
+    out_dir = '%s/zz.plots' % sys.argv[1]
     process_logs(sys.argv[1])
     try:
         os.mkdir('%s/zz.plots' % sys.argv[1])
     except:
         pass
-    # tabulate()
-    overhead()
+    overhead_interval()
+    # overhead()
