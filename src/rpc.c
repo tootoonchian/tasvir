@@ -1,15 +1,11 @@
 #include "tasvir.h"
 
-TASVIR_RPCFN_DEFINE(tasvir_init_thread, tasvir_thread *, pid_t, uint16_t)
-TASVIR_RPCFN_DEFINE(tasvir_new, tasvir_area_desc *, tasvir_area_desc)
-TASVIR_RPCFN_DEFINE(tasvir_delete, int, tasvir_area_desc *)
-TASVIR_RPCFN_DEFINE(tasvir_init_finish, int, tasvir_thread *)
-TASVIR_RPCFN_DEFINE(tasvir_update_owner, int, tasvir_area_desc *, tasvir_thread *)
-TASVIR_RPCFN_DEFINE(tasvir_attach_helper, int, tasvir_area_desc *, tasvir_node *)
-#ifdef TASVIR_DAEMON
-TASVIR_RPCFN_DEFINE(tasvir_sync_external_area, int, tasvir_area_desc *, bool)
-#endif
-
+TASVIR_RPCFN_DEFINE(tasvir_init_thread, 0, tasvir_thread *, pid_t, uint16_t)
+TASVIR_RPCFN_DEFINE(tasvir_new, 0, tasvir_area_desc *, tasvir_area_desc)
+TASVIR_RPCFN_DEFINE(tasvir_delete, 0, int, tasvir_area_desc *)
+TASVIR_RPCFN_DEFINE(tasvir_init_finish, 0, int, tasvir_thread *)
+TASVIR_RPCFN_DEFINE(tasvir_update_owner, 0, int, tasvir_area_desc *, tasvir_thread *)
+TASVIR_RPCFN_DEFINE(tasvir_attach_helper, 0, int, tasvir_area_desc *, tasvir_node *)
 
 void tasvir_init_rpc() {
     TASVIR_RPCFN_REGISTER(tasvir_init_thread);
@@ -18,9 +14,6 @@ void tasvir_init_rpc() {
     TASVIR_RPCFN_REGISTER(tasvir_init_finish);
     TASVIR_RPCFN_REGISTER(tasvir_update_owner);
     TASVIR_RPCFN_REGISTER(tasvir_attach_helper);
-#ifdef TASVIR_DAEMON
-    TASVIR_RPCFN_REGISTER(tasvir_sync_external_area);
-#endif
 }
 
 static tasvir_rpc_status *tasvir_vrpc(tasvir_area_desc *d, tasvir_fnptr fnptr, va_list argp) {
@@ -36,12 +29,19 @@ static tasvir_rpc_status *tasvir_vrpc(tasvir_area_desc *d, tasvir_fnptr fnptr, v
     HASH_FIND(h_fnptr, ttld.ht_fnptr, &fnptr, sizeof(fnptr), fnd);
     assert(fnd);
 
+    if (d->owner && d->owner->state != TASVIR_THREAD_STATE_RUNNING) {
+        char tid_str[48];
+        tasvir_tid2str(&d->owner->tid, tid_str, sizeof(tid_str));
+        LOG_DBG("area %s owner %s is not running", d->name, tid_str);
+        return NULL;
+    }
+
     /* FIXME: former case is only at init time for a non-root daemon */
-    m->h.dst_tid = d->owner->active ? d->owner->tid : ttld.ndata->rootcast_tid;
+    m->h.dst_tid = d->owner ? d->owner->tid : ttld.ndata->rootcast_tid;
     m->h.src_tid = ttld.thread ? ttld.thread->tid : ttld.ndata->nodecast_tid;
     m->h.id = ttld.nr_msgs++ % TASVIR_NR_RPC_MSG;
     m->h.type = TASVIR_MSG_TYPE_RPC_REQUEST;
-    m->h.time_us = d->h ? d->h->time_us : ttld.ndata->time_us;
+    m->h.version = d->h ? d->h->version : 0;
     m->d = d;
     m->fid = fnd->fid;
     ptr = &m->data[TASVIR_ALIGN_ARG(fnd->ret_len)];
@@ -77,7 +77,7 @@ static tasvir_rpc_status *tasvir_vrpc(tasvir_area_desc *d, tasvir_fnptr fnptr, v
     if (tasvir_service_msg((tasvir_msg *)m, TASVIR_MSG_SRC_ME) != 0)
         return NULL;
 
-    if (fnd->oneway)
+    if (fnd->flags & TASVIR_FN_NOACK)
         return NULL;
 
     tasvir_rpc_status *rs = &ttld.status_l[m->h.id];
@@ -86,6 +86,7 @@ static tasvir_rpc_status *tasvir_vrpc(tasvir_area_desc *d, tasvir_fnptr fnptr, v
         rte_mempool_put(ttld.ndata->mp, (void *)rs->response);
     rs->do_free = false;
     rs->id = m->h.id;
+    rs->fnd = fnd;
     rs->status = TASVIR_RPC_STATUS_PENDING;
     rs->response = NULL;
     return rs;
@@ -102,7 +103,7 @@ tasvir_rpc_status *tasvir_rpc(tasvir_area_desc *d, tasvir_fnptr fnptr, ...) {
 int tasvir_rpc_wait(uint64_t timeout_us, void **retval, tasvir_area_desc *d, tasvir_fnptr fnptr, ...) {
     bool done = false;
     bool failed = false;
-    uint64_t end_tsc = tasvir_rdtsc() + tasvir_usec2tsc(timeout_us);
+    uint64_t end_tsc = __rdtsc() + tasvir_usec2tsc(timeout_us);
     va_list argp;
     va_start(argp, fnptr);
     tasvir_rpc_status *rs = tasvir_vrpc(d, fnptr, argp);
@@ -110,7 +111,7 @@ int tasvir_rpc_wait(uint64_t timeout_us, void **retval, tasvir_area_desc *d, tas
     if (!rs)
         return -1; /* no response. FIXME: oneway should return 0 */
 
-    while (tasvir_rdtsc() < end_tsc && !done && !failed) {
+    while (__rdtsc() < end_tsc && !done && !failed) {
         switch (rs->status) {
         case TASVIR_RPC_STATUS_INVALID:
         case TASVIR_RPC_STATUS_FAILED:
@@ -119,43 +120,45 @@ int tasvir_rpc_wait(uint64_t timeout_us, void **retval, tasvir_area_desc *d, tas
         case TASVIR_RPC_STATUS_PENDING:
             break;
         case TASVIR_RPC_STATUS_DONE:
-            if (!rs->response) {
+            if (!rs->response || rs->response->d != d) {
                 LOG_DBG("bad response");
                 failed = true;
                 break;
             }
             /* FIXME: find a better way to ensure state is visible. what if attached to writer view? */
-            /* FIXME: useless if rpc does not update the area */
-            done = !rs->response->d ||
-                   (rs->response->d->h->active && rs->response->d->h->time_us >= rs->response->h.time_us);
+            done = !rs->response->d || (rs->fnd->flags & TASVIR_FN_NOMODIFY) ||
+                   (tasvir_area_is_active(d) && rs->response->d->h->version >= rs->response->h.version);
             /* a hack to workaround torn writes during boot time */
-            if (unlikely(done && !ttld.thread)) {
-                done = !rs->response->d->h->private_tag.external_sync_pending;
+            if (!done) {
+                _mm_pause();
+            } else if (unlikely(!ttld.thread)) {
+                done = !(rs->response->d->h->flags_ & TASVIR_AREA_CACHE_NETUPDATE);
             }
             break;
         default:
             LOG_DBG("invalid rpc status %d", rs->status);
             failed = true;
+            break;
         }
         tasvir_service();
     }
 
+    static const char *tasvir_rpc_status_type_str[] = {"invalid", "pending", "failed", "done"};
     if (failed || !done) {
-        static const char *tasvir_rpc_status_type_str[] = {"invalid", "pending", "failed", "done"};
         if (rs->response)
             rte_mempool_put(ttld.ndata->mp, (void *)rs->response);
-        LOG_INFO("failed (failed=%d done=%d status=%s h=%p time_us=%lu expected_us=%lu)", failed, done,
-                 tasvir_rpc_status_type_str[rs->status], rs->response ? (void *)rs->response->d->h : NULL,
-                 rs->response ? rs->response->d->h->time_us : 0, rs->response ? rs->response->h.time_us : 0);
+        LOG_ERR("failed area=%s fn=%s failed=%d done=%d status=%s h=%p version=%lu expected=%lu", d ? d->name : NULL,
+                rs->fnd ? rs->fnd->name : NULL, failed, done, tasvir_rpc_status_type_str[rs->status],
+                rs->response ? (void *)rs->response->d->h : NULL, rs->response ? rs->response->d->h->version : 0,
+                rs->response ? rs->response->h.version : 0);
         return -1;
     }
 
     if (retval) {
-        /* FIXME: badly insecure */
-        tasvir_fn_desc *fnd = &ttld.fn_descs[rs->response->fid];
-        memcpy(retval, rs->response->data, fnd->ret_len);
+        memcpy(retval, rs->response->data, rs->fnd->ret_len);
     }
     rte_mempool_put(ttld.ndata->mp, (void *)rs->response);
+
     return 0;
 }
 

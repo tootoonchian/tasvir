@@ -120,10 +120,10 @@ int tasvir_init_port() {
         // return -1;
     }
 
-    end_tsc = tasvir_rdtsc() + tasvir_usec2tsc(3 * S2US);
+    end_tsc = __rdtsc() + tasvir_usec2tsc(3 * S2US);
     do {
         rte_eth_link_get(ttld.ndata->port_id, &link);
-    } while (tasvir_rdtsc() < end_tsc && link.link_status != ETH_LINK_UP);
+    } while (__rdtsc() < end_tsc && link.link_status != ETH_LINK_UP);
 
     /*
     if (link.link_status != ETH_LINK_UP) {

@@ -75,18 +75,13 @@ typedef enum {
     TASVIR_RPC_STATUS_DONE
 } tasvir_rpc_status_type;
 
+typedef enum {
+    TASVIR_FN_NOACK = 1,    /* function does not expect an ack; i.e., unreliable delivery */
+    TASVIR_FN_NOMODIFY = 2, /* function does not modify the area; i.e., sender must check */
+    TASVIR_FN_NORET = 4,    /* function has a void return type */
+} tasvir_fn_flag;
+
 typedef struct tasvir_msg_rpc tasvir_msg_rpc;
-
-/**
- * Status of a pending RPC
- */
-typedef struct tasvir_rpc_status {
-    bool do_free;
-    uint16_t id;
-    tasvir_rpc_status_type status;
-    tasvir_msg_rpc *response;
-} tasvir_rpc_status;
-
 
 /**
  * Function descriptor used by RPC.
@@ -96,7 +91,7 @@ typedef struct tasvir_fn_desc {
     tasvir_fnptr_rpc fnptr_rpc;
     tasvir_fnptr fnptr;
     uint32_t fid;
-    uint8_t oneway;
+    uint8_t flags;
     uint8_t argc;
     int ret_len;
     size_t arg_lens[TASVIR_NR_RPC_ARGS];
@@ -105,39 +100,19 @@ typedef struct tasvir_fn_desc {
 } tasvir_fn_desc;
 
 /**
- * Node id consists of its mac address.
+ * Status of a pending RPC
  */
-typedef struct tasvir_nid {
-    struct ether_addr mac_addr;
-} tasvir_nid;
+typedef struct tasvir_rpc_status {
+    bool do_free;
+    uint16_t id;
+    tasvir_fn_desc *fnd;
+    tasvir_rpc_status_type status;
+    tasvir_msg_rpc *response;
+} tasvir_rpc_status;
 
-/**
- * Thread id consists of node id, local identifier, and the process pid.
- */
-typedef struct tasvir_tid {
-    tasvir_nid nid;
-    uint16_t idx;
-    pid_t pid;
-} tasvir_tid;
 
-/**
- * Thread
- */
-typedef struct tasvir_thread {
-    tasvir_tid tid;
-    uint16_t core;
-    bool active;
-    // TODO: do we need to know thread's type?
-} tasvir_thread;
-
-/**
- *
- */
-typedef struct tasvir_node {
-    tasvir_nid nid;
-    uint32_t heartbeat_us;
-    tasvir_thread threads[TASVIR_NR_THREADS_LOCAL];
-} tasvir_node;
+typedef struct tasvir_node tasvir_node;
+typedef struct tasvir_thread tasvir_thread;
 
 /**
  *
@@ -157,7 +132,6 @@ typedef struct tasvir_area_desc {
     uint64_t sync_int_us;  /* internal synchronization interval in microseconds */
     uint64_t sync_ext_us;  /* external synchronization interval in microseconds */
     tasvir_area_type type; /* area type */
-    bool active;
 } tasvir_area_desc;
 
 /**
@@ -174,26 +148,22 @@ typedef struct tasvir_area_log {
 /**
  *
  */
-typedef struct tasvir_area_header {
-    struct {
-        bool rw; /* used to id the writer version */
-        bool local;
-        // bool owned;
-        bool external_sync_pending;
-    } private_tag; /* not to be synced */
-    tasvir_area_desc *d __attribute__((aligned(1 << TASVIR_SHIFT_BIT)));
+typedef struct __attribute__((aligned(TASVIR_CACHELINE_BYTES))) tasvir_area_header {
+    union {
+        uint64_t flags_;
+        uint8_t pad_[1 << TASVIR_SHIFT_BIT];
+    }; /* guaranteed not to be synced (local to each cached copy) */
+    tasvir_area_desc *d;
     uint64_t version;
     uint64_t time_us;
     size_t nr_areas;
     size_t nr_users;
-    bool active;
     tasvir_area_log diff_log[TASVIR_NR_AREA_LOGS];
     struct {
         tasvir_node *node;
         uint64_t version;
-        bool active;
-    } users[TASVIR_NR_NODES_AREA];
-} __attribute__((aligned(TASVIR_CACHELINE_BYTES))) tasvir_area_header;
+    } users[TASVIR_NR_NODES];
+} tasvir_area_header;
 
 /**
  *
@@ -203,7 +173,8 @@ typedef struct tasvir_stats {
     uint64_t failure;
     uint64_t sync_barrier_us;
     uint64_t sync_us; /* inclusive of barrier time */
-    uint64_t sync_bytes;
+    uint64_t sync_changed_bytes;
+    uint64_t sync_processed_bytes;
     uint64_t rx_bytes;
     uint64_t tx_bytes;
     uint64_t rx_pkts;

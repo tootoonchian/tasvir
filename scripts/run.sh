@@ -2,6 +2,17 @@
 
 [[ "$TRACE"  ]] && set -x
 
+COMPILER=${COMPILER:-gcc}
+if [[ "$COMPILER" == gcc ]]; then
+    export CC=$(command -v gcc)
+    export CXX=$(command -v g++)
+elif [[ "$COMPILER" == clang ]]; then
+    export CC=$(command -v clang)
+    export CXX=$(command -v clang++)
+else
+    echo 'COMPILER must be gcc or clang'
+    exit 1
+fi
 RUNSCRIPT=$(realpath "${BASH_SOURCE[0]}")
 SCRIPTDIR=$(dirname "$RUNSCRIPT")
 LOGDIR=$SCRIPTDIR/log
@@ -9,13 +20,16 @@ DPDK_DRIVER=${DPDK_DRIVER:-igb_uio}
 TASVIR_SRCDIR=$(realpath "$SCRIPTDIR/..")
 TASVIR_CONFDIR=$TASVIR_SRCDIR/etc
 TASVIR_CONF=$TASVIR_CONFDIR/tasvir.conf
-TASVIR_BINDIR=$TASVIR_SRCDIR/build/bin
+TASVIR_BUILDDIR=$TASVIR_SRCDIR/build.$COMPILER
+TASVIR_BINDIR=$TASVIR_BUILDDIR/bin
 PIDFILE_PREFIX=/var/run/tasvir-
-RTE_SDK=${RTE_SDK:-/srv/resq/nf/dpdk-v18.08}
+RTE_SDK=${RTE_SDK:-/srv/resq/nf/dpdk-v19.02}
 
 prepare() {
+    sync
+    local nr_hugepages=1050
     echo never >/sys/kernel/mm/transparent_hugepage/enabled
-    sysctl vm.nr_hugepages=1050 &>/dev/null
+    sysctl vm.nr_hugepages=$nr_hugepages &>/dev/null
 
     modprobe "$DPDK_DRIVER" &>/dev/null
     if [[ ${HOST_NIC[$HOSTNAME]} = *"bonding="*  ]]; then
@@ -31,6 +45,7 @@ prepare() {
     done
     rm -f /dev/shm/tasvir /dev/hugepages/tasvir* /var/run/.tasvir_config &>/dev/null
 
+    # echo 1 > /proc/sys/kernel/randomize_va_space
     echo 1 > /sys/module/processor/parameters/ignore_ppc
     echo 0 > /proc/sys/kernel/nmi_watchdog
     [ -f /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq ] && max_freq=$(cat /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq)
@@ -38,60 +53,71 @@ prepare() {
         # fix core frequency
         if [ -d "$cpu/cpufreq" ]; then
             echo performance > "$cpu/cpufreq/scaling_governor"
+            # echo "$max_freq" > "$cpu/cpufreq/scaling_setspeed"
             echo "$max_freq" > "$cpu/cpufreq/scaling_min_freq"
             echo "$max_freq" > "$cpu/cpufreq/scaling_max_freq"
         fi
         # disable c states
         if [ -d "$cpu/cpuidle" ]; then
-            for state in "$cpu"/cpuidle/state[1-9]/disable; do
-                echo 1 > "$state/disable"
+            for state_disable in "$cpu"/cpuidle/state[1-9]/disable; do
+                echo 1 > "$state_disable"
             done
         fi
         # disable p states
         if [ -d /sys/devices/system/cpu/intel_pstate ]; then
+            echo 0 > /sys/devices/system/cpu/intel_pstate/hwp_dynamic_boost
             echo 1 > /sys/devices/system/cpu/intel_pstate/no_turbo
             echo 100 > /sys/devices/system/cpu/intel_pstate/min_perf_pct
             echo 100 > /sys/devices/system/cpu/intel_pstate/max_perf_pct
         fi
     done &>/dev/null
+    [ -f /sys/devices/system/cpu/cpufreq/boost ] && echo 0 > /sys/devices/system/cpu/cpufreq/boost
     # disable uncore frequency scaling
-    wrmsr -a 0x620 0x1d1d
-    date > /tmp/prepare.done
+    wrmsr -a 0x620 0x1818
     pkill -f "tail.*-f.*.$HOSTNAME"
     mkdir "$LOGDIR" &>/dev/null
+    while ! egrep -q "HugePages_Free:\s+$nr_hugepages" /proc/meminfo; do
+        echo $HOSTNAME: Waiting for hugepages to be free
+        sleep 2
+    done
+    service irqbalance stop
+
+    sync
+    date > /tmp/prepare.done
 }
 
 compile() {
-    #export CC=$(which clang)
-    #export CXX=$(which clang++)
-
-    mkdir "$TASVIR_SRCDIR/build" &>/dev/null
-    cd "$TASVIR_SRCDIR/build" || return
+    mkdir "$TASVIR_BUILDDIR" &>/dev/null
+    cd "$TASVIR_BUILDDIR" || return
+    local build_system
+    local build_cmd=make
     if command -v ninja &>/dev/null; then
-        cmake -GNinja -DCMAKE_BUILD_TYPE=Release .. && ninja
-    else
-        cmake -DCMAKE_BUILD_TYPE=Release .. && make
+        build_system="-GNinja"
+        build_cmd=ninja
     fi
+    cmake $build_system .. && $build_cmd || exit 1
 }
 
 generate_cmd() {
     generate_cmd_worker() {
         local redirect
-        if [ ! -z "$DEBUG" ]; then
+        if [ "$DEBUG" = 1 ]; then
             redirect="2>&1 | tee $logfile"
-            cmd_worker="exec /usr/bin/taskset -c %CORE% gdb -ex run --args stdbuf -o 0 -e 0 $* $redirect"
+            local gdbcmds
+            [ -f gdb.cmds ] && gdbcmds="--command gdb.cmds"
+            cmd_worker="exec /usr/bin/taskset -c %CORE% gdb -ex run $gdbcmds --args stdbuf -o 0 -e 0 $* $redirect"
         else
             redirect=">$logfile 2>&1"
             cmd_worker="start-stop-daemon --background --start --make-pidfile --pidfile ${PIDFILE_PREFIX}%WID%.pid --startas "
             cmd_worker+="/bin/bash -- -c \"exec /usr/bin/taskset -c %CORE% stdbuf -o 0 -e 0 $* $redirect\";"
-            cmd_worker+="sleep 1; stdbuf -o 0 -e 0 tail -n 1000 -f $logfile"
+            cmd_worker+="sleep 0.1; stdbuf -o 0 -e 0 tail -n 1000 -f $logfile"
         fi
         cmd_worker=$(echo "$cmd_worker" | sed -e "s/%CORE%/$core/g" -e "s/%WID%/$wid/g" -e "s/%NR_WORKERS%/$nr_workers/g" -e "s/%HOST%/$host/g")
         ((core--))
     }
 
     local nr_workers=${nr_workers:-1}
-    local delay=${delay:-3}
+    local delay=${delay:-0.3}
 
     local host_counter=0
     local host_list=("${host_list[@]:-${!HOST_NCORES[@]}}")
@@ -101,6 +127,7 @@ generate_cmd() {
     local cmd_app="$*"
     local cmd_ssh
     local cmd_worker
+    local core
     local session=tasvir_run_$host
     local pane=0
     local timestamp
@@ -115,14 +142,6 @@ generate_cmd() {
     cmd="mkdir -p $logdir &>/dev/null;"
     cmd+="byobu "
     tmux has-session -t "$session" &>/dev/null || cmd+="new-session -Ads $session\\; "
-    cmd+="set-option -t '$session' -q mouse-utf8 on\\; "
-    cmd+="set-option -t '$session' -q mouse-resize-pane on\\; "
-    cmd+="set-option -t '$session' -q mouse-select-pane on\\; "
-    cmd+="set-option -t '$session' -q mouse-select-window on\\; "
-    cmd+="set-option -t '$session' -q window-style 'fg=colour247,bg=colour236'\\; "
-    cmd+="set-option -t '$session' -q window-active-style 'fg=colour250,bg=black'\\; "
-    cmd+="set-window-option -t '$session' -q mode-mouse on\\; "
-    cmd+="set-window-option -t '$session' -q remain-on-exit off\\; "
     # [ -z $TMUX ] && cmd+="attach-session -t $session\\; " || cmd+="switch-client -t $session\\; "
 
     # wid: worker_id
@@ -146,8 +165,8 @@ generate_cmd() {
         # run the daemon before the first worker
         if [ $nr_worker_cur -eq 0 ]; then
             local pciaddr=${HOST_NIC[$host]}
-            local core=$((HOST_NCORES[$host] - 1))
             local cmd_daemon
+            core=$((HOST_NCORES[$host] - 1))
             cmd_daemon="$TASVIR_BINDIR/tasvir_daemon --core %CORE% --pciaddr $pciaddr"$([ "$wid" -eq 0 ] && echo " --root")
             local wid2=$wid
             wid=d
@@ -156,7 +175,7 @@ generate_cmd() {
             window=$host-n$nr_workers-t$timestamp-w$((window_idx++))
             generate_cmd_worker "$cmd_daemon"
             cmd+="$cmd_ssh '$cmd_worker'\\; "
-            cmd+="select-pane -t $session:$window.0 -P 'bg=colour240'\\; "
+            cmd+="select-pane -t $session:$window.0 -P 'bg=colour233'\\; "
             wid=$wid2
             nr_worker_cur=1
             pane=1
@@ -174,12 +193,21 @@ generate_cmd() {
         ((nr_worker_cur++))
     done
 
-    cmd+="; sleep 1; byobu "
-    cmd+="kill-window -t $session:0\\; "
-    cmd+="select-layout -t $session:$window tiled\\; "
+    cmd+="; sleep 0.5; byobu "
+    cmd+="kill-window -t '$session:0'\\; "
+    cmd+="select-layout -t '$session:$window' tiled\\; "
     window=${host_list[0]}-n$nr_workers-t$timestamp-w0
-    cmd+="select-window -t $session:$window\\; "
-    cmd+="select-pane -t $session:$window.1\\; "
+    cmd+="select-window -t '$session:$window'\\; "
+    cmd+="select-pane -t '$session:$window.1'\\; "
+    cmd+="resize-pane -Z -t '$session:$window.1'\\; "
+    cmd+="set-option -t '$session' -q mouse-utf8 on\\; "
+    cmd+="set-option -t '$session' -q mouse-resize-pane on\\; "
+    cmd+="set-option -t '$session' -q mouse-select-pane on\\; "
+    cmd+="set-option -t '$session' -q mouse-select-window on\\; "
+    cmd+="set-option -t '$session' -q window-style 'bg=colour237'\\; "
+    cmd+="set-option -t '$session' -q window-active-style 'bg=colour0'\\; "
+    cmd+="set-window-option -t '$session' -q mode-mouse on\\; "
+    cmd+="set-window-option -t '$session' -q remain-on-exit off\\; "
     cmd+="; echo -e nr_workers=$nr_workers cmd_app=$cmd_app > $manifest;"
 
     local cmd_prepare=

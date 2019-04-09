@@ -103,7 +103,7 @@ Array<T>* Array<T>::Allocate(const char* parent_name, uint64_t wid, std::size_t 
     Array<T>* parent;
     Array<T>* worker;
 
-    tasvir_area_desc* root_desc = tasvir_attach(NULL, "root", NULL, false);
+    tasvir_area_desc* root_desc = tasvir_attach(NULL, "root", false);
     if (!root_desc) {
         std::cerr << "tasvir_attach to root failed" << std::endl;
         abort();
@@ -137,7 +137,7 @@ Array<T>* Array<T>::Allocate(const char* parent_name, uint64_t wid, std::size_t 
 
         for (std::size_t i = 0; i < nr_workers; i++) {
             snprintf(name, sizeof(name), "%s-%d", name, i);
-            d = tasvir_attach_wait(root_desc, name, NULL, i == wid, 5 * 1000 * 1000);
+            d = tasvir_attach_wait(root_desc, name, i == wid, 5 * 1000 * 1000);
             if (!d) {
                 std::cerr << "tasvir_attach " << name << " failed" << std::endl;
                 abort();
@@ -154,7 +154,7 @@ Array<T>* Array<T>::Allocate(const char* parent_name, uint64_t wid, std::size_t 
 
         tasvir_service_wait(5 * 1000 * 1000);
         snprintf(name, sizeof(name), "%s-0", name);
-        d = tasvir_attach_wait(root_desc, name, NULL, true, 5 * 1000 * 1000);
+        d = tasvir_attach_wait(root_desc, name, true, 5 * 1000 * 1000);
         if (!d) {
             std::cerr << "tasvir_attach " << name << " failed" << std::endl;
             abort();

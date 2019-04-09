@@ -15,13 +15,13 @@ static void tasvir_msg_mem_generate(tasvir_area_desc *d, void *addr, size_t len,
         m[i]->h.src_tid = ttld.thread->tid;
         m[i]->h.id = ttld.nr_msgs++ % TASVIR_NR_RPC_MSG;
         m[i]->h.type = TASVIR_MSG_TYPE_MEM;
-        m[i]->h.time_us = ttld.ndata->time_us;
+        m[i]->h.version = d->h->version;
         m[i]->d = d;
         m[i]->addr = addr;
         m[i]->len = MIN(TASVIR_CACHELINE_BYTES * TASVIR_NR_CACHELINES_PER_MSG, len);
         m[i]->h.mbuf.pkt_len = m[i]->h.mbuf.data_len =
             m[i]->len + offsetof(tasvir_msg_mem, line) - offsetof(tasvir_msg, eh);
-        tasvir_mov_blocks_stream(m[i]->line, is_rw ? tasvir_data2shadow(addr) : addr, m[i]->len);
+        tasvir_stream_vec_rep(m[i]->line, is_rw ? tasvir_data2shadow(addr) : addr, m[i]->len);
 
         addr = (uint8_t *)addr + m[i]->len;
         len -= m[i]->len;
@@ -47,8 +47,8 @@ static void tasvir_msg_mem_generate(tasvir_area_desc *d, void *addr, size_t len,
 
 /* TODO: could use AVX */
 static void tasvir_rotate_logs(tasvir_area_desc *d) {
-    if (!d->active)
-        return;
+    if (!tasvir_area_is_active(d))
+        abort();
 
     /* always rotate the first one (assumption: rotate called right after an external sync)
      * rotate the second one after five seconds
@@ -179,8 +179,15 @@ static size_t tasvir_sync_external_area_noinit(tasvir_area_desc *d) { return tas
 /* FIXME: no error handling/reporting */
 int tasvir_sync_external() {
     return 0;
+
+    /* attach to new node areas */
+    tasvir_area_desc *c = tasvir_data(ttld.root_desc);
+    for (size_t i = 0; i < ttld.root_desc->h->nr_areas; i++)
+        if (c[i].type == TASVIR_AREA_TYPE_NODE && !tasvir_area_is_attached(&c[i], ttld.node))
+            tasvir_attach(ttld.root_desc, c[i].name, false);
+
     ttld.ndata->last_sync_ext_start = ttld.ndata->time_us;
-    size_t retval = tasvir_walk_areas(ttld.root_desc, &tasvir_sync_external_area_noinit);
+    size_t retval = tasvir_area_walk(ttld.root_desc, &tasvir_sync_external_area_noinit);
     ttld.ndata->time_us = tasvir_gettime_us();
     ttld.ndata->last_sync_ext_end = ttld.ndata->time_us;
     return retval > 0 ? 0 : -1;

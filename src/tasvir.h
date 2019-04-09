@@ -26,13 +26,52 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
-#include <tasvir/tasvir.h>
 #include <time.h>
 #include <x86intrin.h>
 
-/**
- *
- */
+#include <tasvir/tasvir.h>
+
+typedef enum {
+    TASVIR_THREAD_STATE_INVALID = 0,
+    TASVIR_THREAD_STATE_DEAD,
+    TASVIR_THREAD_STATE_BOOTING,
+    TASVIR_THREAD_STATE_RUNNING,
+    TASVIR_THREAD_STATE_SLEEPING
+} tasvir_thread_state;
+
+// static const char *tasvir_thread_state_str[] = {"invalid", "dead", "booting", "running"};
+
+typedef struct tasvir_nid {
+    struct ether_addr mac_addr; /* node identified by its mac address */
+} tasvir_nid;
+
+typedef struct tasvir_tid {
+    tasvir_nid nid; /* node id */
+    uint16_t idx;   /* local index */
+    uint16_t core;  /* local core */
+    pid_t pid;      /* pid */
+} tasvir_tid;
+
+struct tasvir_thread { /* thread context */
+    uint64_t time_us;
+    tasvir_tid tid;
+    tasvir_thread_state state; /* thread state. updated by daemon only */
+};
+
+struct tasvir_node { /* node context */
+    tasvir_nid nid;
+    uint32_t heartbeat_us;
+    tasvir_thread threads[TASVIR_NR_THREADS_LOCAL];
+};
+
+typedef enum {
+    TASVIR_AREA_CACHE_ACTIVE = 1 << 0,    /* set once area is bootstrapped */
+    TASVIR_AREA_CACHE_MAPPED_RW = 1 << 1, /* distinguish reader and writer copies */
+    TASVIR_AREA_CACHE_LOCAL = 1 << 2,     /* area owner is local */
+    TASVIR_AREA_CACHE_NETUPDATE = 1 << 3, /* network updates are being applied */
+    TASVIR_AREA_CACHE_SLEEPING = 1 << 4,  /* not syncing temporarily */
+} tasvir_area_cache_flag;
+
 typedef enum {
     TASVIR_MSG_TYPE_INVALID = 0,
     TASVIR_MSG_TYPE_MEM,
@@ -41,9 +80,6 @@ typedef enum {
     TASVIR_MSG_TYPE_RPC_RESPONSE
 } tasvir_msg_type;
 
-/**
- *
- */
 typedef struct __attribute__((__packed__)) tasvir_msg {
     struct {
         struct rte_mbuf mbuf;
@@ -55,7 +91,7 @@ typedef struct __attribute__((__packed__)) tasvir_msg {
     tasvir_tid dst_tid;
     tasvir_msg_type type;
     uint16_t id;
-    uint64_t time_us;
+    uint64_t version; /* version at source */
 } tasvir_msg;
 
 /**
@@ -87,14 +123,6 @@ typedef struct tasvir_local_tdata tasvir_local_tdata;
 typedef struct tasvir_local_ndata tasvir_local_ndata;
 typedef struct tasvir_sync_job tasvir_sync_job;
 typedef struct tasvir_tls_data tasvir_tls_data;
-typedef enum {
-    TASVIR_THREAD_STATE_INVALID = 0,
-    TASVIR_THREAD_STATE_DEAD,
-    TASVIR_THREAD_STATE_BOOTING,
-    TASVIR_THREAD_STATE_RUNNING
-} tasvir_thread_state;
-
-// static const char *tasvir_thread_state_str[] = {"invalid", "dead", "booting", "running"};
 
 typedef enum {
     TASVIR_MSG_SRC_INVALID = 0,
@@ -106,24 +134,27 @@ typedef enum {
 
 // static const char *tasvir_msg_src_str[] = {"invalid", "me", "local", "net2us", "net2root"};
 
-struct tasvir_local_tdata { /* thread data */
+struct __attribute__((aligned(8))) tasvir_local_tdata { /* thread data */
     uint64_t time_us;
     struct rte_ring *ring_tx;
     struct rte_ring *ring_rx;
-    tasvir_thread_state state;
-    size_t prev_sync_seq; /* prev sync sequence number. updated by thread only. */
-    size_t next_sync_seq; /* next sync sequence number. updated by daemon only. */
-} __attribute__((aligned(8)));
+    tasvir_thread_state state;     /* thread state. updated by daemon only */
+    tasvir_thread_state state_req; /* state transition request by thread */
+    size_t prev_sync_seq;          /* prev sync sequence number. updated by thread only. */
+    size_t next_sync_seq;          /* next sync sequence number. updated by daemon only. */
+};
 
 struct tasvir_sync_job {
     tasvir_area_desc *d;
-    atomic_size_t offset;
+    bool done;
+    bool admit;
+    atomic_size_t offset __attribute__((aligned(TASVIR_CACHELINE_BYTES)));
     atomic_size_t bytes_seen;
     atomic_size_t bytes_updated;
-    bool done __attribute__((aligned(TASVIR_CACHELINE_BYTES)));
-} __attribute__((aligned(TASVIR_CACHELINE_BYTES)));
+};
 
-struct tasvir_local_ndata { /* node data */
+struct __attribute__((aligned(8))) tasvir_local_ndata { /* node data */
+    uint64_t boot_us;
     uint64_t time_us;
     uint64_t sync_int_us;
     uint64_t sync_ext_us;
@@ -163,21 +194,16 @@ struct tasvir_local_ndata { /* node data */
 
     /* thread data */
     tasvir_local_tdata tdata[TASVIR_NR_THREADS_LOCAL];
-} __attribute__((aligned(8)));
+};
 
-struct tasvir_tls_data { /* thread-internal data */
-    tasvir_area_desc *node_desc;
-    tasvir_area_desc *root_desc;
-
-    tasvir_local_ndata *ndata;
-    tasvir_local_tdata *tdata; /* this thread's tdata */
-
-    tasvir_node *node;
-    tasvir_thread *thread;
-
-    uint64_t tsc;
-
-    bool is_root;
+/* thread-internal data */
+struct __attribute__((aligned(4096))) tasvir_tls_data {
+    tasvir_area_desc *root_desc; /* root area descriptor */
+    tasvir_area_desc *node_desc; /* current node's area descriptor */
+    tasvir_node *node;           /* current node's global data */
+    tasvir_thread *thread;       /* current thread's global data */
+    tasvir_local_ndata *ndata;   /* current node's node-local data */
+    tasvir_local_tdata *tdata;   /* current thread's node-local data */
 
     uint16_t nr_msgs;
     int fd;
@@ -186,89 +212,13 @@ struct tasvir_tls_data { /* thread-internal data */
     tasvir_fn_desc *ht_fid;
     tasvir_fn_desc *ht_fnptr;
     tasvir_rpc_status status_l[TASVIR_NR_RPC_MSG];
+
+    bool is_root;
 } ttld; /* tasvir thread-local data */
+
 
 _Static_assert(sizeof(tasvir_local_ndata) <= TASVIR_SIZE_LOCAL,
                "TASVIR_SIZE_LOCAL smaller than sizeof(tasvir_local_ndata)");
-
-#define MS2US (1000)
-#define S2US (1000 * MS2US)
-
-#define RED "\x1B[31m"
-#define GRN "\x1B[32m"
-#define YEL "\x1B[33m"
-#define BLU "\x1B[34m"
-#define MAG "\x1B[35m"
-#define CYN "\x1B[36m"
-#define WHT "\x1B[37m"
-#define RESET "\x1B[0m"
-
-#define LOG_COLORS(MSG_CLR, FMT, ...)                                                   \
-    {                                                                                   \
-        fprintf(stderr, GRN "%16.3f " CYN "%-22.22s " MSG_CLR FMT "\n" RESET,           \
-                ttld.ndata ? ttld.ndata->time_us / 1000. : 0, __func__, ##__VA_ARGS__); \
-    }
-
-#ifdef __AVX512F__
-#define TASVIR_VEC_UNIT 64
-#elif __AVX2__
-#define TASVIR_VEC_UNIT 32
-#elif __AVX__
-#define TASVIR_VEC_UNIT 16
-#else
-#error Tasvir requires AVX, AVX2, or AVX512 support
-#endif
-
-#ifndef TASVIR_LOG_LEVEL
-#define TASVIR_LOG_LEVEL 7
-#endif
-
-#if TASVIR_LOG_LEVEL >= 7
-#define TASVIR_DEBUG
-#define LOG_DBG(FMT, ...) LOG_COLORS(WHT, FMT, ##__VA_ARGS__)
-#else
-#define LOG_DBG(FMT, ...) \
-    do {                  \
-    } while (0)
-#endif
-#if TASVIR_LOG_LEVEL >= 6
-#define LOG_VERBOSE(FMT, ...) LOG_COLORS(WHT, FMT, ##__VA_ARGS__)
-#else
-#define LOG_VERBOSE(FMT, ...) \
-    do {                      \
-    } while (0)
-#endif
-#if TASVIR_LOG_LEVEL >= 4
-#define LOG_INFO(FMT, ...) LOG_COLORS(YEL, FMT, ##__VA_ARGS__)
-#else
-#define LOG_INFO(FMT, ...) \
-    do {                   \
-    } while (0)
-#endif
-#if TASVIR_LOG_LEVEL >= 3
-#define LOG_WARN(FMT, ...) LOG_COLORS(YEL, FMT, ##__VA_ARGS__)
-#else
-#define LOG_WARN(FMT, ...) \
-    do {                   \
-    } while (0)
-#endif
-#if TASVIR_LOG_LEVEL >= 2
-#define LOG_ERR(FMT, ...) LOG_COLORS(RED, FMT, ##__VA_ARGS__)
-#else
-#define LOG_ERR(FMT, ...) \
-    do {                  \
-    } while (0)
-#endif
-#if TASVIR_LOG_LEVEL >= 1
-#define LOG_FATAL(FMT, ...) LOG_COLORS(RED, FMT, ##__VA_ARGS__)
-#else
-#define LOG_FATAL(FMT, ...) \
-    do {                    \
-    } while (0)
-#endif
-
-#define MIN(x, y) (x < y ? x : y)
-#define TASVIR_ALIGN_ARG(x) (size_t) TASVIR_ALIGNX(x, sizeof(tasvir_arg_promo_t))
 
 /* function prototypes */
 
@@ -289,88 +239,59 @@ int tasvir_sync_internal();
 int tasvir_sync_external();
 size_t tasvir_sync_external_area(tasvir_area_desc *d, bool init);
 
-/* utils */
+/* area utils */
 
-/* FIXME: consistency checks... */
-static inline bool tasvir_area_is_valid(const tasvir_area_desc *d) { return d && d->active && d->h && d->owner; }
-static inline bool tasvir_area_is_local(const tasvir_area_desc *d) { return d->h->private_tag.local; }
-static inline bool tasvir_area_is_mapped_rw(const tasvir_area_desc *d) { return d->h->private_tag.rw; }
-
-static inline uint64_t tasvir_gettime_us() { return ttld.ndata->tsc2usec_mult * tasvir_rdtsc(); }
-// static inline uint64_t tasvir_tsc2usec(uint64_t tsc) { return tsc * ttld.ndata->tsc2usec_mult; }
-static inline uint64_t tasvir_usec2tsc(uint64_t us) { return us / ttld.ndata->tsc2usec_mult; }
-
-__attribute__((unused)) static inline void tasvir_hexdump(void *addr, size_t len) {
-    uint8_t *b = (uint8_t *)addr;
-    size_t i;
-    for (i = 0; i < len; i += 4) {
-        if (i && i % 32 == 0)
-            fprintf(stderr, "\n");
-        fprintf(stderr, "%02X%02X%02X%02X ", b[i], b[i + 1], b[i + 2], b[i + 3]);
+static inline bool tasvir_area_is_attached(const tasvir_area_desc *d, const tasvir_node *node) {
+    if (d->h && d->h->d == d) {
+        if (!node)
+            return true;
+        for (size_t i = 0; i < d->h->nr_users; i++)
+            if (d->h->users[i].node == node)
+                return true;
     }
-    fprintf(stderr, "\n");
+    return false;
 }
 
-static inline void tasvir_tid2str(tasvir_tid tid, size_t buf_size, char *buf) {
-    ether_format_addr(buf, buf_size, &tid.nid.mac_addr);
-    snprintf(&buf[strlen(buf)], buf_size - strlen(buf), ":%d", tid.idx);
+static inline bool tasvir_area_is_active(const tasvir_area_desc *d) {
+    return d && d->owner && d->h && (d->h->flags_ & TASVIR_AREA_CACHE_ACTIVE);
 }
 
-/* assumption src and dst are TASVIR_VEC_UNIT aligned, len > 0 and multiple of TASVIR_VEC_UNIT */
-static inline void tasvir_mov_blocks(void *dst, const void *src, size_t len) {
-    do {
-#if TASVIR_VEC_UNIT == 64
-        __m512i m = _mm512_load_si512((const __m512i *)src);
-        _mm512_store_si512((__m512i *)dst, m);
-#elif TASVIR_VEC_UNIT == 32
-        __m256i m = _mm256_load_si256((const __m256i *)src);
-        _mm256_store_si256((__m256i *)dst, m);
-#elif TASVIR_VEC_UNIT == 16
-        __m128i m = _mm_load_si128((__m128i *)src);
-        _mm_store_si128((__m128i *)dst, m);
-#else
-#error unsupported TASVIR_VEC_UNIT
-#endif
-        dst = (uint8_t *)dst + TASVIR_VEC_UNIT;
-        src = (uint8_t *)src + TASVIR_VEC_UNIT;
-    } while ((len -= TASVIR_VEC_UNIT) > 0);
+static inline bool tasvir_area_is_active_any(const tasvir_area_desc *d) {
+    return d && d->owner && d->h &&
+           ((d->h->flags_ & TASVIR_AREA_CACHE_ACTIVE) ||
+            (((tasvir_area_header *)tasvir_data2shadow(d->h))->flags_ & TASVIR_AREA_CACHE_ACTIVE));
 }
 
-/* assumption src and dst are TASVIR_VEC_UNIT aligned, len > 0 and multiple of TASVIR_VEC_UNIT */
-static inline void tasvir_mov_blocks_stream(void *dst, const void *src, size_t len) {
-    do {
-#if TASVIR_VEC_UNIT == 64
-        __m512i m = _mm512_stream_load_si512((__m512i *)src);
-        _mm512_stream_si512((__m512i *)dst, m);
-#elif TASVIR_VEC_UNIT == 32
-        __m256i m = _mm256_stream_load_si256((__m256i *)src);
-        _mm256_stream_si256((__m256i *)dst, m);
-#elif TASVIR_VEC_UNIT == 16
-        __m128i m = _mm_stream_load_si128((__m128i *)src);
-        _mm_stream_si128((__m128i *)dst, m);
-#else
-#error unsupported TASVIR_VEC_UNIT
-#endif
-        dst = (uint8_t *)dst + TASVIR_VEC_UNIT;
-        src = (uint8_t *)src + TASVIR_VEC_UNIT;
-    } while ((len -= TASVIR_VEC_UNIT) > 0);
+static inline bool tasvir_area_is_local(const tasvir_area_desc *d) {
+    return tasvir_area_is_active_any(d) &&
+           ((d->h->flags_ & TASVIR_AREA_CACHE_LOCAL) ||
+            (((tasvir_area_header *)tasvir_data2shadow(d->h))->flags_ & TASVIR_AREA_CACHE_LOCAL));
 }
 
-__attribute__((unused)) static inline void tasvir_memset_stream(void *dst, char c, size_t len) {
-    uint8_t *ptr = dst;
-    while ((uintptr_t)ptr & 31UL) {
-        *ptr = c;
-        ptr++;
+static inline bool tasvir_area_is_local_by_tid(const tasvir_area_desc *d) {
+    return memcmp(&d->owner->tid.nid, &ttld.node->nid, sizeof(tasvir_nid)) == 0;
+}
+
+static inline bool tasvir_area_is_mapped_rw(const tasvir_area_desc *d) {
+    return tasvir_area_is_active(d) && (d->h->flags_ & TASVIR_AREA_CACHE_MAPPED_RW);
+}
+
+typedef size_t (*tasvir_fnptr_walkcb)(tasvir_area_desc *);
+static inline size_t tasvir_area_walk(tasvir_area_desc *d, tasvir_fnptr_walkcb fnptr) {
+    if (!tasvir_area_is_active_any(d))
+        return 0;
+    size_t retval = 0;
+    retval += fnptr(d);
+    if (d->type == TASVIR_AREA_TYPE_CONTAINER) {
+        tasvir_area_desc *c = tasvir_data(d);
+        for (size_t i = 0; i < d->h->nr_areas; i++) {
+            retval += tasvir_area_walk(&c[i], fnptr);
+        }
     }
-    __m256i m = _mm256_set1_epi8(c);
-    while (len >= 32) {
-        _mm256_stream_si256((__m256i *)ptr, m);
-        ptr += 32;
-        len -= 32;
-    }
-    while (len-- > 0)
-        *ptr++ = c;
+    return retval;
 }
+
+/* i/o utils */
 
 static inline void tasvir_populate_msg_nethdr(tasvir_msg *m) {
     m->mbuf.refcnt = 1;
@@ -384,49 +305,6 @@ static inline void tasvir_populate_msg_nethdr(tasvir_msg *m) {
     ttld.ndata->stats_cur.tx_pkts++;
 }
 
-__attribute__((unused)) static inline void tasvir_print_area(tasvir_area_desc *d) {
-    LOG_DBG("name=%s owner=%p version=%lu time_us=%lu", d->name, (void *)d->owner, d->h ? d->h->version : 0,
-            d->h ? d->h->time_us : 0);
-}
+#include "utils.h"
 
-static inline void tasvir_print_msg(tasvir_msg *m, bool is_src_me, bool is_dst_me) {
-    static const char *tasvir_msg_type_str[] = {"invalid", "memory", "rpc_oneway", "rpc_request", "rpc_reply"};
-
-    tasvir_str src_str, dst_str;
-    char direction;
-    tasvir_tid2str(m->src_tid, sizeof(src_str), src_str);
-    tasvir_tid2str(m->dst_tid, sizeof(dst_str), dst_str);
-    if (is_src_me)
-        direction = 'O';
-    else if (is_dst_me)
-        direction = 'I';
-    else
-        direction = 'F';
-    if (m->type == TASVIR_MSG_TYPE_RPC_RESPONSE || m->type == TASVIR_MSG_TYPE_RPC_REQUEST) {
-        tasvir_msg_rpc *mr = (tasvir_msg_rpc *)m;
-        /* FIXME: badly insecure */
-        tasvir_fn_desc *fnd = &ttld.fn_descs[mr->fid];
-
-        LOG_DBG("%c %s->%s id=%d type=%s desc=%s f=%s", direction, src_str, dst_str, m->id,
-                tasvir_msg_type_str[m->type], mr->d ? mr->d->name : "root", fnd->name);
-    } else {
-        LOG_DBG("%c %s->%s id=%d type=%s", direction, src_str, dst_str, m->id, tasvir_msg_type_str[m->type]);
-    }
-    // tasvir_hexdump(&m->h.eh, m->h.mbuf.data_len);
-}
-
-typedef size_t (*tasvir_fnptr_walkcb)(tasvir_area_desc *);
-static inline size_t tasvir_walk_areas(tasvir_area_desc *d, tasvir_fnptr_walkcb fnptr) {
-    if (!d->active)
-        return 0;
-    size_t retval = 0;
-    retval += fnptr(d);
-    if (d->type == TASVIR_AREA_TYPE_CONTAINER) {
-        tasvir_area_desc *c = tasvir_data(d);
-        for (size_t i = 0; i < d->h->nr_areas; i++) {
-            retval += tasvir_walk_areas(&c[i], fnptr);
-        }
-    }
-    return retval;
-}
 #endif /* TASVIR_SRC_TASVIR_TASVIR_H_ */

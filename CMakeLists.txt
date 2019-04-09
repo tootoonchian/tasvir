@@ -1,9 +1,10 @@
 cmake_minimum_required(VERSION 3.3)
 
-project(tasvir VERSION 0.1.0 DESCRIPTION "Tasvir: A Shared View Network Interface")
-
 include(GNUInstallDirs)
 
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Choose the build type: Debug Release RelWithDebInfo MinSizeRel." FORCE)
+endif()
 if(${CMAKE_SOURCE_DIR} STREQUAL ${CMAKE_BINARY_DIR})
     message(FATAL_ERROR "Please invoke cmake from a build directory outside of the source directory: e.g., mkdir build; cmake ..")
 endif()
@@ -13,9 +14,8 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_ON)
-if(NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE RelWithDebInfo)
-endif()
+
+project(tasvir VERSION 0.1.0 DESCRIPTION "Tasvir: A Shared View Network Interface")
 
 if(NOT DEFINED ENV{RTE_SDK})
     message(FATAL_ERROR "Undefined RTE_SDK env var.")
@@ -34,43 +34,45 @@ set(TASVIR_COMPILE_OPTIONS
     -Wall -Wextra -pedantic
     -march=native
     -D_GNU_SOURCE=1
+    -ffast-math -flto
     -fvisibility=hidden
-    -flto
     $<$<COMPILE_LANGUAGE:C>:-D_POSIX_C_SOURCE=200809L>
     $<$<COMPILE_LANGUAGE:CXX>:-fno-rtti>
     $<$<COMPILE_LANGUAGE:CXX>:-D__STDC_LIMIT_MACROS>
-    $<$<C_COMPILER_ID:GNU>:-fno-tree-loop-distribute-patterns -fno-semantic-interposition -fdiagnostics-color=always>
+    # -fno-tree-loop-distribute-patterns
+    $<$<C_COMPILER_ID:GNU>:-fno-semantic-interposition -fdiagnostics-color=always -fuse-linker-plugin>
     $<$<C_COMPILER_ID:Clang>:-fcolor-diagnostics -Wno-gnu-zero-variadic-macro-arguments>
-    -Ofast
     )
 set(TASVIR_LINK_OPTIONS
-    -flto)
+    -flto
+    $<$<C_COMPILER_ID:GNU>:-fuse-linker-plugin>
+    )
 
 file(GLOB_RECURSE tasvir_public_headers include/*)
-file(GLOB tasvir_src src/*.[ch])
-list(REMOVE_ITEM tasvir_src src/daemon.c)
+set(tasvir_src src/area.c src/dpdk.c src/init.c src/rpc.c src/service.c src/stat.c src/sync_internal.c src/tasvir.h src/utils.h)
 add_library(tasvir_obj OBJECT ${tasvir_src})
 target_compile_features(tasvir_obj PUBLIC c_std_11 cxx_std_11)
 target_compile_options(tasvir_obj PUBLIC ${TASVIR_COMPILE_OPTIONS})
 target_include_directories(tasvir_obj PUBLIC include)
-target_link_libraries(tasvir_obj PUBLIC dl m rt pthread "-Wl,--whole-archive -ldpdk -Wl,--no-whole-archive" ${TASVIR_LINK_OPTIONS})
-set_target_properties(tasvir_obj PROPERTIES POSITION_INDEPENDENT_CODE 1 PUBLIC_HEADER "${tasvir_public_headers}" VERSION ${PROJECT_VERSION})
+target_link_libraries(tasvir_obj PUBLIC dl m numa rt pthread "-Wl,--whole-archive -ldpdk -Wl,--no-whole-archive" ${TASVIR_LINK_OPTIONS})
+set_target_properties(tasvir_obj PROPERTIES POSITION_INDEPENDENT_CODE ON PUBLIC_HEADER "${tasvir_public_headers}" VERSION ${PROJECT_VERSION})
 
 add_library(tasvir SHARED $<TARGET_OBJECTS:tasvir_obj>)
 target_link_libraries(tasvir PUBLIC tasvir_obj)
-set_target_properties(tasvir PROPERTIES POSITION_INDEPENDENT_CODE 1 PUBLIC_HEADER "${tasvir_public_headers}" VERSION ${PROJECT_VERSION})
+set_target_properties(tasvir PROPERTIES POSITION_INDEPENDENT_CODE ON PUBLIC_HEADER "${tasvir_public_headers}" VERSION ${PROJECT_VERSION})
 
 add_library(tasvir_static STATIC $<TARGET_OBJECTS:tasvir_obj>)
 target_link_libraries(tasvir_static PUBLIC tasvir_obj)
-set_target_properties(tasvir_static PROPERTIES POSITION_INDEPENDENT_CODE 1 PUBLIC_HEADER "${tasvir_public_headers}" VERSION ${PROJECT_VERSION})
+set_target_properties(tasvir_static PROPERTIES POSITION_INDEPENDENT_CODE ON PUBLIC_HEADER "${tasvir_public_headers}" VERSION ${PROJECT_VERSION})
 
-add_executable(tasvir_daemon ${tasvir_src} src/daemon.c)
+set(tasvir_src_daemon ${tasvir_src} src/daemon.c src/sync_external.c)
+add_executable(tasvir_daemon ${tasvir_src_daemon})
 target_compile_definitions(tasvir_daemon PRIVATE TASVIR_DAEMON=1)
-set_target_properties(tasvir_daemon PROPERTIES POSITION_INDEPENDENT_CODE 1)
+set_target_properties(tasvir_daemon PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_compile_features(tasvir_daemon PRIVATE c_std_11 cxx_std_11)
 target_compile_options(tasvir_daemon PRIVATE ${TASVIR_COMPILE_OPTIONS})
 target_include_directories(tasvir_daemon PRIVATE include)
-target_link_libraries(tasvir_daemon PRIVATE dl m rt pthread "-Wl,--whole-archive -ldpdk -Wl,--no-whole-archive" ${TASVIR_LINK_OPTIONS})
+target_link_libraries(tasvir_daemon PRIVATE dl m numa rt pthread "-Wl,--whole-archive -ldpdk -Wl,--no-whole-archive" ${TASVIR_LINK_OPTIONS})
 
 install(TARGETS tasvir
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -84,7 +86,7 @@ configure_file(tasvir.pc.in tasvir.pc @ONLY)
 
 macro(add_tasvir_exec target)
     add_executable(${target} ${ARGN})
-    set_target_properties(${target} PROPERTIES C_STANDARD 11 CXX_STANDARD 11 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+    set_target_properties(${target} PROPERTIES C_STANDARD 11 CXX_STANDARD 14 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO POSITION_INDEPENDENT_CODE ON)
     target_link_libraries(${target} tasvir_obj)
 endmacro(add_tasvir_exec)
 
@@ -104,3 +106,8 @@ endmacro(add_tasvir_exec)
 
 add_subdirectory(apps)
 add_subdirectory(doc)
+
+string(REPLACE "-O2" "-O3" CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITHDEBINFO}")
+string(REPLACE "-O2" "-O3" CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO}")
+set(CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITHDEBINFO}" CACHE STRING "" FORCE)
+set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO}" CACHE STRING "" FORCE)

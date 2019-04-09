@@ -42,7 +42,7 @@
 #define TASVIR_NR_FN (4096)               /**< Maximum number of RPC functions */
 #define TASVIR_NR_RPC_ARGS (8)            /**< Maximum number of RPC function arguments */
 #define TASVIR_NR_RPC_MSG (64 * 1024)     /**< Maximum number of outstanding RPC messages */
-#define TASVIR_NR_NODES_AREA (64)         /**< Maximum number of nodes in Tasvir */
+#define TASVIR_NR_NODES (64)              /**< Maximum number of nodes in Tasvir */
 #define TASVIR_NR_SOCKETS (2)             /**< Maximum number of CPU sockets per node */
 #define TASVIR_NR_SYNC_JOBS (2048)        /**< Maximum number of internal sync jobs */
 #define TASVIR_NR_THREADS_LOCAL (64)      /**< Maximum number of local threads */
@@ -82,6 +82,9 @@
     ((uintptr_t)(TASVIR_ADDR_SHADOW - TASVIR_HUGEPAGE_SIZE)) /**< The base virtual address for the root descriptor */
 #define TASVIR_ADDR_DPDK_BASE \
     ((uintptr_t)(TASVIR_ADDR_END + TASVIR_HUGEPAGE_SIZE)) /**< The end virtual address for DPDK */
+// #define TASVIR_ADDR_DATA_RW ((uintptr_t)(TASVIR_ADDR_END)) /**< The base virtual address for the data region */
+// #define TASVIR_ADDR_DATA_RO ((uintptr_t)(TASVIR_ADDR_DATA_RW + TASVIR_SIZE_DATA + 96)) /**< The base virtual address
+// for the shadow region */
 
 #define TASVIR_OFFSET_SHADOW (TASVIR_ADDR_SHADOW - TASVIR_ADDR_DATA)
 #define TASVIR_OFFSET_LOG (TASVIR_ADDR_LOG - TASVIR_ADDR_DATA)
@@ -102,16 +105,16 @@
 #define TASVIR_F_ARGVAL(t, i) *((t *)&((uint8_t *)v)[o[i]])
 #define TASVIR_F_SIZEOF(t, i) sizeof(t)
 
-#define TASVIR_RPCFN_DEFINE(fn, ret_t, ...)                                                  \
+#define TASVIR_RPCFN_DEFINE(fn, flags_val, ret_t, ...)                                       \
     static void fn##_RPCFN(void *v, ptrdiff_t *o) {                                          \
         *((ret_t *)&((uint8_t *)v)[0]) = fn(TASVIR_APPLY_ALL(TASVIR_F_ARGVAL, __VA_ARGS__)); \
     }                                                                                        \
     static void fn##_RPCFN_REGISTER() {                                                      \
         tasvir_rpc_fn_register(&(tasvir_fn_desc){                                            \
+            .name = #fn,                                                                     \
             .fnptr_rpc = &fn##_RPCFN,                                                        \
             .fnptr = (tasvir_fnptr)&fn,                                                      \
-            .name = #fn,                                                                     \
-            .oneway = 0,                                                                     \
+            .flags = flags_val,                                                              \
             .argc = TASVIR_NUM_ARGS(__VA_ARGS__),                                            \
             .ret_len = sizeof(ret_t),                                                        \
             .arg_lens = {TASVIR_APPLY_ALL(TASVIR_F_SIZEOF, __VA_ARGS__)},                    \
