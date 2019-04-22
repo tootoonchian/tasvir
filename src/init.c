@@ -27,25 +27,16 @@ static int tasvir_init_local() {
     }
     base = mmap((void *)TASVIR_ADDR_BASE, size_whole, PROT_READ | PROT_WRITE, MAP_NORESERVE | MAP_SHARED, ttld.fd, 0);
     if (base != (void *)TASVIR_ADDR_BASE) {
-        LOG_ERR("mmap failed");
+        LOG_ERR("mmap failed asked %p got %p", (void *)TASVIR_ADDR_BASE, base);
         return -1;
     }
-    /*
-    base = mmap((void *)TASVIR_ADDR_DATA_RW, TASVIR_SIZE_DATA, PROT_READ | PROT_WRITE, MAP_NORESERVE | MAP_SHARED,
-                ttld.fd, TASVIR_ADDR_SHADOW - TASVIR_ADDR_BASE);
-    if (base != (void *)TASVIR_ADDR_DATA_RW) {
-        LOG_ERR("mmap DATA_RW failed (%p expected %p)", base, TASVIR_ADDR_DATA_RW);
+    base = mmap((void *)TASVIR_ADDR_BASE2, size_whole, PROT_READ | PROT_WRITE, MAP_NORESERVE | MAP_SHARED, ttld.fd, 0);
+    if (base != (void *)TASVIR_ADDR_BASE2) {
+        LOG_ERR("mmap failed asked %p got %p", (void *)TASVIR_ADDR_BASE2, base);
         return -1;
     }
-    base = mmap((void *)TASVIR_ADDR_DATA_RO, TASVIR_SIZE_DATA, PROT_READ | PROT_WRITE, MAP_NORESERVE | MAP_SHARED,
-                ttld.fd, TASVIR_ADDR_DATA - TASVIR_ADDR_BASE);
-    if (base != (void *)TASVIR_ADDR_DATA_RO) {
-        LOG_ERR("mmap DATA_RO failed (%p expected %p)", base, TASVIR_ADDR_DATA_RO);
-        return -1;
-    }
-    */
 
-    madvise((void *)TASVIR_ADDR_BASE, size_whole, MADV_HUGEPAGE);
+    // madvise((void *)TASVIR_ADDR_BASE, size_whole, MADV_HUGEPAGE);
 
     ttld.ndata = (void *)TASVIR_ADDR_LOCAL;
     ttld.tdata = &ttld.ndata->tdata[TASVIR_THREAD_DAEMON_IDX];
@@ -83,7 +74,7 @@ static int tasvir_init_local() {
     ttld.ndata->sync_int_us = TASVIR_SYNC_INTERNAL_US;
     ttld.ndata->sync_ext_us = TASVIR_SYNC_EXTERNAL_US;
     ttld.ndata->tsc2usec_mult = 1E6 / rte_get_tsc_hz();
-    ttld.ndata->boot_us = ttld.ndata->time_us = tasvir_gettime_us();
+    ttld.ndata->boot_us = ttld.ndata->time_us = tasvir_time_us();
 
     /* ids */
     ttld.ndata->update_tid.nid = (tasvir_nid){.mac_addr = {{0x01, 0x00, 0x5e, 0x00, 0x0f, 0xff}}};
@@ -153,7 +144,7 @@ static int tasvir_init_node() {
                                                    .name0 = *(tasvir_str_static *)name,
                                                    .len = sizeof(tasvir_node),
                                                    .nr_areas_max = 0,
-                                                   .boot_us = tasvir_gettime_us()});
+                                                   .boot_us = tasvir_time_us()});
     if (!ttld.node_desc) {
         LOG_ERR("failed to allocate node");
         return -1;
@@ -174,7 +165,7 @@ static int tasvir_init_node() {
     ttld.node = tasvir_data(ttld.node_desc);
 
     /* daemon alive? */
-    uint64_t time_us = tasvir_gettime_us();
+    uint64_t time_us = tasvir_time_us();
     if (!ttld.node_desc->h) {
         LOG_ERR("daemon is inactive");
         return -1;
@@ -294,7 +285,7 @@ int tasvir_init_finish(tasvir_thread *t) {
 tasvir_area_desc *tasvir_init(uint16_t core) {
     if (ttld.node || ttld.thread) {
         LOG_ERR("tasvir_init may have already been called");
-        return NULL;
+        return ttld.root_desc;
     }
 
     /* ttld has static storage and is automatically zero-initialized */

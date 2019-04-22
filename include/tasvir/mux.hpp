@@ -28,7 +28,7 @@ public:
         std::size_t wid;
         _done = _version;
         tasvir_log(&_done, sizeof(_done));
-        tasvir_service_wait();
+        tasvir_service_wait(5 * 1000 * 1000, true);
 
         if (_tid == 0) {
             for (wid = 0; wid < _nr_workers; wid++)

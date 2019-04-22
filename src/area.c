@@ -70,7 +70,7 @@ tasvir_area_desc *tasvir_new(tasvir_area_desc desc) {
 
     tasvir_area_desc *d = NULL;
     tasvir_area_desc *c = NULL;
-    uint64_t time_us = tasvir_gettime_us();
+    uint64_t time_us = tasvir_time_us();
     bool is_root_area = !desc.pd;
     bool is_parent_owner = tasvir_area_is_owner(desc.pd);
     bool is_owner = desc.type == TASVIR_AREA_TYPE_NODE ? !ttld.node : tasvir_area_is_owner(&desc);
@@ -114,7 +114,7 @@ tasvir_area_desc *tasvir_new(tasvir_area_desc desc) {
             /* ensure area does not exist */
             for (size_t i = 0; i < desc.pd->h->nr_areas; i++) {
                 if (strncmp(c[i].name, desc.name, sizeof(tasvir_str)) == 0) {
-                    LOG_ERR("area exists");
+                    LOG_ERR("area %s already exists", desc.name);
                     return NULL;
                 }
             }
@@ -257,7 +257,8 @@ tasvir_area_desc *tasvir_attach(tasvir_area_desc *pd, const char *name, bool wri
         abort();
     }
 
-    tasvir_update_va(d, writer);
+    if (writer != tasvir_area_is_mapped_rw(d))
+        tasvir_update_va(d, writer);
 
     if (!tasvir_area_is_active(d)) {
         if (tasvir_area_is_local(d)) {

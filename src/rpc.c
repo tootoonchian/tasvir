@@ -46,6 +46,19 @@ static tasvir_rpc_status *tasvir_vrpc(tasvir_area_desc *d, tasvir_fnptr fnptr, v
     m->fid = fnd->fid;
     ptr = &m->data[TASVIR_ALIGN_ARG(fnd->ret_len)];
 
+    struct tasvir_12b_arg_t {
+        uint8_t i[12];
+    };
+    struct tasvir_64b_arg_t {
+        uint8_t i[64];
+    };
+    struct tasvir_320b_arg_t {
+        uint8_t i[320];
+    };
+    struct tasvir_512b_arg_t {
+        uint8_t i[512];
+    };
+
     for (i = 0; i < fnd->argc; i++) {
         ptr = &m->data[fnd->arg_offsets[i]];
         switch (fnd->arg_lens[i]) {
@@ -54,6 +67,18 @@ static tasvir_rpc_status *tasvir_vrpc(tasvir_area_desc *d, tasvir_fnptr fnptr, v
             break;
         case 16:
             *(__uint128_t *)ptr = va_arg(argp, __uint128_t);
+            break;
+        case 12:
+            *(struct tasvir_12b_arg_t *)ptr = va_arg(argp, struct tasvir_12b_arg_t);
+            break;
+        case 64:
+            *(struct tasvir_64b_arg_t *)ptr = va_arg(argp, struct tasvir_64b_arg_t);
+            break;
+        case 320:
+            *(struct tasvir_320b_arg_t *)ptr = va_arg(argp, struct tasvir_320b_arg_t);
+            break;
+        case 512:
+            *(struct tasvir_512b_arg_t *)ptr = va_arg(argp, struct tasvir_512b_arg_t);
             break;
         case (sizeof(tasvir_str_static)):
             *(tasvir_str_static *)ptr = va_arg(argp, tasvir_str_static);

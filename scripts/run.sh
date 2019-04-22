@@ -29,6 +29,7 @@ prepare() {
     sync
     local nr_hugepages=1050
     echo never >/sys/kernel/mm/transparent_hugepage/enabled
+    echo never >/sys/kernel/mm/transparent_hugepage/defrag
     sysctl vm.nr_hugepages=$nr_hugepages &>/dev/null
 
     modprobe "$DPDK_DRIVER" &>/dev/null
@@ -73,7 +74,7 @@ prepare() {
     done &>/dev/null
     [ -f /sys/devices/system/cpu/cpufreq/boost ] && echo 0 > /sys/devices/system/cpu/cpufreq/boost
     # disable uncore frequency scaling
-    wrmsr -a 0x620 0x1818
+    wrmsr -a 0x620 0x1d1d
     pkill -f "tail.*-f.*.$HOSTNAME"
     mkdir "$LOGDIR" &>/dev/null
     while ! egrep -q "HugePages_Free:\s+$nr_hugepages" /proc/meminfo; do
@@ -100,16 +101,16 @@ compile() {
 
 generate_cmd() {
     generate_cmd_worker() {
-        local redirect
+        local pidfile=${PIDFILE_PREFIX}%WID%.pid
         if [ "$DEBUG" = 1 ]; then
-            redirect="2>&1 | tee $logfile"
-            local gdbcmds
-            [ -f gdb.cmds ] && gdbcmds="--command gdb.cmds"
-            cmd_worker="exec /usr/bin/taskset -c %CORE% gdb -ex run $gdbcmds --args stdbuf -o 0 -e 0 $* $redirect"
+            local gdbcmd="gdb -q -ex set\ pagination\ off -ex run "
+            [ -f gdb.cmds ] && gdbcmd+="--command gdb.cmds "
+            gdbcmd+="--args"
+            cmd_worker="echo \$\$ > $pidfile; "
+            cmd_worker+="/usr/bin/script -f -c \"exec /usr/bin/numactl -a -l -C %CORE% $gdbcmd $*\" $logfile"
         else
-            redirect=">$logfile 2>&1"
-            cmd_worker="start-stop-daemon --background --start --make-pidfile --pidfile ${PIDFILE_PREFIX}%WID%.pid --startas "
-            cmd_worker+="/bin/bash -- -c \"exec /usr/bin/taskset -c %CORE% stdbuf -o 0 -e 0 $* $redirect\";"
+            cmd_worker="start-stop-daemon --background --start --make-pidfile --pidfile $pidfile --startas "
+            cmd_worker+="/usr/bin/script -- -f -c \"exec /usr/bin/numactl -a -l -C %CORE% $*\" $logfile; "
             cmd_worker+="sleep 0.1; stdbuf -o 0 -e 0 tail -n 1000 -f $logfile"
         fi
         cmd_worker=$(echo "$cmd_worker" | sed -e "s/%CORE%/$core/g" -e "s/%WID%/$wid/g" -e "s/%NR_WORKERS%/$nr_workers/g" -e "s/%HOST%/$host/g")
@@ -139,12 +140,10 @@ generate_cmd() {
     local logfile="$logdir/t%WID%.%HOST%"
     local nr_worker_cur=0
 
-    cmd="mkdir -p $logdir &>/dev/null;"
-    cmd+="byobu "
-    tmux has-session -t "$session" &>/dev/null || cmd+="new-session -Ads $session\\; "
-    # [ -z $TMUX ] && cmd+="attach-session -t $session\\; " || cmd+="switch-client -t $session\\; "
+    cmd="mkdir -p $logdir &>/dev/null; "
+    cmd+="tmux has-session -t '$session' &>/dev/null || byobu new-session -Ads '$session' "
 
-    # wid: worker_id
+    local wid # worker_id
     for wid in $(seq 0 $((nr_workers - 1))); do
         # move to the next host if numbers of workers reached the preset threshold
         if [ $nr_worker_cur -eq "${host_nr_workers[$host_counter]}" ]; then
@@ -156,9 +155,9 @@ generate_cmd() {
 
         # create a new window for every 4 panes
         if [ $((pane % 4)) -eq 0 ]; then
-            [ ! -z "$window" ] && cmd+="select-layout -t $session:$window tiled\\; "
+            [ ! -z "$window" ] && cmd+="select-layout -t '$session:$window' tiled\\; "
             window=$host-n$nr_workers-t$timestamp-w$((window_idx++))
-            cmd+="; byobu new-window -t $session -n $window "
+            cmd+="; byobu new-window -t '$session' -n '$window' "
             pane=0
         fi
 
@@ -170,12 +169,12 @@ generate_cmd() {
             cmd_daemon="$TASVIR_BINDIR/tasvir_daemon --core %CORE% --pciaddr $pciaddr"$([ "$wid" -eq 0 ] && echo " --root")
             local wid2=$wid
             wid=d
-            cmd_ssh=$([ "$HOSTNAME" != "$host" ] && echo "ssh -tt $host")
+            cmd_ssh=$([ "$HOSTNAME" != "$host" ] && echo "ssh -o LogLevel=QUIET -tt $host")
             window_idx=0
             window=$host-n$nr_workers-t$timestamp-w$((window_idx++))
             generate_cmd_worker "$cmd_daemon"
             cmd+="$cmd_ssh '$cmd_worker'\\; "
-            cmd+="select-pane -t $session:$window.0 -P 'bg=colour233'\\; "
+            cmd+="select-pane -t '$session:$window.0' -P 'bg=colour233'\\; "
             wid=$wid2
             nr_worker_cur=1
             pane=1
@@ -183,7 +182,7 @@ generate_cmd() {
 
         # create a new pane
         if [ $((pane % 4)) -ne 0 ]; then
-            cmd+="split-window -t $session:$window "
+            cmd+="split-window -t '$session:$window' "
         fi
 
         # run the worker
@@ -194,12 +193,12 @@ generate_cmd() {
     done
 
     cmd+="; sleep 0.5; byobu "
-    cmd+="kill-window -t '$session:0'\\; "
+    # cmd+="kill-window -t '$session:0'\\; "
     cmd+="select-layout -t '$session:$window' tiled\\; "
     window=${host_list[0]}-n$nr_workers-t$timestamp-w0
     cmd+="select-window -t '$session:$window'\\; "
     cmd+="select-pane -t '$session:$window.1'\\; "
-    cmd+="resize-pane -Z -t '$session:$window.1'\\; "
+    [ ! -z $ZOOM_WID0 ] && cmd+="resize-pane -Z -t '$session:$window.1'\\; "
     cmd+="set-option -t '$session' -q mouse-utf8 on\\; "
     cmd+="set-option -t '$session' -q mouse-resize-pane on\\; "
     cmd+="set-option -t '$session' -q mouse-select-pane on\\; "
@@ -208,11 +207,12 @@ generate_cmd() {
     cmd+="set-option -t '$session' -q window-active-style 'bg=colour0'\\; "
     cmd+="set-window-option -t '$session' -q mode-mouse on\\; "
     cmd+="set-window-option -t '$session' -q remain-on-exit off\\; "
-    cmd+="; echo -e nr_workers=$nr_workers cmd_app=$cmd_app > $manifest;"
+    # [ -z $TMUX ] && cmd+="attach-session -t $session\\; " || cmd+="switch-client -t $session\\; "
+    cmd+="; echo -e nr_workers=$nr_workers cmd_app=$cmd_app > $manifest; "
 
     local cmd_prepare=
     for h in $(seq 0 $host_counter); do
-        cmd_prepare+="ssh -tt ${host_list[$h]} $RUNSCRIPT prepare; "
+        cmd_prepare+="ssh -o LogLevel=QUIET -tt ${host_list[$h]} $RUNSCRIPT prepare; "
     done
     echo "$cmd_prepare $cmd"
 }

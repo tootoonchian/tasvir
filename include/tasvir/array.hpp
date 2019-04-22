@@ -35,7 +35,7 @@ class Array {
         std::size_t wid;
         _done = _version;
         tasvir_log(&_done, sizeof(_done));
-        tasvir_service_wait(5 * 1000 * 1000);
+        tasvir_service_wait(5 * 1000 * 1000, true);
 
         if (_wid == 0) {
             for (wid = 0; wid < _nr_workers; wid++)
@@ -148,11 +148,11 @@ Array<T>* Array<T>::Allocate(const char* parent_name, uint64_t wid, std::size_t 
         }
         parent->_initialized = 0xdeadbeef;
         tasvir_log(parent, sizeof(*parent));
-        tasvir_service_wait(5 * 1000 * 1000);
+        tasvir_service_wait(5 * 1000 * 1000, true);
     } else {
         worker->_initialized = 0xdeadbeef;
 
-        tasvir_service_wait(5 * 1000 * 1000);
+        tasvir_service_wait(5 * 1000 * 1000, true);
         snprintf(name, sizeof(name), "%s-0", name);
         d = tasvir_attach_wait(root_desc, name, true, 5 * 1000 * 1000);
         if (!d) {

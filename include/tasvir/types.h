@@ -78,7 +78,6 @@ typedef enum {
 typedef enum {
     TASVIR_FN_NOACK = 1,    /* function does not expect an ack; i.e., unreliable delivery */
     TASVIR_FN_NOMODIFY = 2, /* function does not modify the area; i.e., sender must check */
-    TASVIR_FN_NORET = 4,    /* function has a void return type */
 } tasvir_fn_flag;
 
 typedef struct tasvir_msg_rpc tasvir_msg_rpc;

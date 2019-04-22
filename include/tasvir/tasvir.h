@@ -45,7 +45,7 @@ extern "C" {
  * @note
  *   Each application thread that interacts with Tasvir-backed memory must call this function.
  */
-TASVIR_PUBLIC tasvir_area_desc *tasvir_init(uint16_t core);
+TASVIR_PUBLIC __attribute__((noinline)) tasvir_area_desc *tasvir_init(uint16_t core);
 
 /**
  * @brief
@@ -54,7 +54,7 @@ TASVIR_PUBLIC tasvir_area_desc *tasvir_init(uint16_t core);
  * @note
  *   Mainly used for benchmarking purposes.
  */
-TASVIR_PUBLIC tasvir_stats tasvir_stats_get(void);
+TASVIR_PUBLIC __attribute__((noinline)) tasvir_stats tasvir_stats_get(void);
 
 /**
  * @brief
@@ -63,7 +63,7 @@ TASVIR_PUBLIC tasvir_stats tasvir_stats_get(void);
  * @note
  *   Mainly used for benchmarking purposes.
  */
-TASVIR_PUBLIC void tasvir_stats_reset(void);
+TASVIR_PUBLIC __attribute__((noinline)) void tasvir_stats_reset(void);
 
 /**
  * @brief
@@ -101,7 +101,8 @@ TASVIR_PUBLIC tasvir_rpc_status *tasvir_rpc(tasvir_area_desc *d, tasvir_fnptr fn
  * @note
  *   The function must be previously registered with tasvir_rpc_fn_register.
  */
-TASVIR_PUBLIC int tasvir_rpc_wait(uint64_t timeout_us, void **retval, tasvir_area_desc *d, tasvir_fnptr fnptr, ...);
+TASVIR_PUBLIC __attribute__((noinline)) int tasvir_rpc_wait(uint64_t timeout_us, void **retval, tasvir_area_desc *d,
+                                                            tasvir_fnptr fnptr, ...);
 
 /**
  * @brief
@@ -114,7 +115,7 @@ TASVIR_PUBLIC int tasvir_rpc_wait(uint64_t timeout_us, void **retval, tasvir_are
  * @note
  *   Call this function frequently (microsecond time scale) outside your critical sections.
  */
-TASVIR_PUBLIC int tasvir_rpc_fn_register(tasvir_fn_desc *fnd);
+TASVIR_PUBLIC __attribute__((noinline)) int tasvir_rpc_fn_register(tasvir_fn_desc *fnd);
 
 /**
  * @brief
@@ -128,7 +129,7 @@ TASVIR_PUBLIC int tasvir_rpc_fn_register(tasvir_fn_desc *fnd);
  *   Call this function every few microseconds (more frequently than TASVIR_BARRIER_ENTER_US / 2)
  *   except when Tasvir areas are not in use (tasvir_activate(false)).
  */
-TASVIR_PUBLIC int tasvir_service();
+TASVIR_PUBLIC __attribute__((noinline)) int tasvir_service();
 
 /**
  * @brief
@@ -138,7 +139,7 @@ TASVIR_PUBLIC int tasvir_service();
  *
  *   Mark a thread inactive before engaging in lengthy initialization or disk I/O.
  */
-TASVIR_PUBLIC void tasvir_activate(bool active);
+TASVIR_PUBLIC __attribute__((noinline)) void tasvir_activate(bool active);
 
 /**
  * @brief
@@ -149,13 +150,17 @@ TASVIR_PUBLIC void tasvir_activate(bool active);
  *   Mark an area inactive if engaging in lengthy modifications to the area which you want to appear
  *   atomically elsewhere. Of course, do not forget to reactivate it :-)
  */
-TASVIR_PUBLIC void tasvir_area_activate(tasvir_area_desc *d, bool active);
+TASVIR_PUBLIC __attribute__((noinline)) void tasvir_area_activate(tasvir_area_desc *d, bool active);
 
 /**
  * @brief
  *   Invokes the Tasvir service routine, requests daemon to schedule an internal synchronization immediately,
  *   and waits for it to happen for at most timeout_us microseconds.
  *
+ * @param timeout_us
+ *   The timeout in microseconds.
+ * @param force
+ *   Request daemon to schedule a synchronization if set.
  * @return
  *   0 if an internal synchronization took place, an error code (-1 for now) otherwise.
  * @note
@@ -163,7 +168,7 @@ TASVIR_PUBLIC void tasvir_area_activate(tasvir_area_desc *d, bool active);
  * @note
  *   You may call this to make a write immediately visible on the local node. This is rarely needed.
  */
-TASVIR_PUBLIC int tasvir_service_wait(uint64_t timeout_us);
+TASVIR_PUBLIC __attribute__((noinline)) int tasvir_service_wait(uint64_t timeout_us, bool force);
 
 /**
  * @brief
@@ -174,7 +179,7 @@ TASVIR_PUBLIC int tasvir_service_wait(uint64_t timeout_us);
  * @return
  *   The created area descriptor or NULL in case of failure.
  */
-TASVIR_PUBLIC tasvir_area_desc *tasvir_new(tasvir_area_desc d);
+TASVIR_PUBLIC __attribute__((noinline)) tasvir_area_desc *tasvir_new(tasvir_area_desc d);
 
 /**
  * @brief
@@ -194,7 +199,8 @@ TASVIR_PUBLIC tasvir_area_desc *tasvir_new(tasvir_area_desc d);
  * @note
  *   Set writer to true iff you know what you are doing.
  */
-TASVIR_PUBLIC tasvir_area_desc *tasvir_attach(tasvir_area_desc *pd, const char *name, bool writer);
+TASVIR_PUBLIC __attribute__((noinline)) tasvir_area_desc *tasvir_attach(tasvir_area_desc *pd, const char *name,
+                                                                        bool writer);
 
 /**
  * @brief
@@ -218,8 +224,8 @@ TASVIR_PUBLIC tasvir_area_desc *tasvir_attach(tasvir_area_desc *pd, const char *
  * @note
  *   Set writer to true iff you know what you are doing.
  */
-TASVIR_PUBLIC tasvir_area_desc *tasvir_attach_wait(tasvir_area_desc *pd, const char *name, bool writer,
-                                                   uint64_t timeout_us);
+TASVIR_PUBLIC __attribute__((noinline)) tasvir_area_desc *tasvir_attach_wait(tasvir_area_desc *pd, const char *name,
+                                                                             bool writer, uint64_t timeout_us);
 
 /**
  * @brief
@@ -232,7 +238,7 @@ TASVIR_PUBLIC tasvir_area_desc *tasvir_attach_wait(tasvir_area_desc *pd, const c
  * @bug
  *   Not implemented yet.
  */
-TASVIR_PUBLIC int tasvir_detach(tasvir_area_desc *d);
+TASVIR_PUBLIC __attribute__((noinline)) int tasvir_detach(tasvir_area_desc *d);
 
 /**
  * @brief
@@ -245,7 +251,7 @@ TASVIR_PUBLIC int tasvir_detach(tasvir_area_desc *d);
  * @bug
  *   Not implemented yet.
  */
-TASVIR_PUBLIC int tasvir_delete(tasvir_area_desc *d);
+TASVIR_PUBLIC __attribute__((noinline)) int tasvir_delete(tasvir_area_desc *d);
 
 /**
  * @brief
@@ -258,7 +264,7 @@ TASVIR_PUBLIC int tasvir_delete(tasvir_area_desc *d);
  * @bug
  *   Not implemented yet.
  */
-TASVIR_PUBLIC int tasvir_update_owner(tasvir_area_desc *d, tasvir_thread *owner);
+TASVIR_PUBLIC __attribute__((noinline)) int tasvir_update_owner(tasvir_area_desc *d, tasvir_thread *owner);
 
 /**
  * @brief
@@ -275,26 +281,8 @@ TASVIR_PUBLIC int tasvir_update_owner(tasvir_area_desc *d, tasvir_thread *owner)
 static inline void *tasvir_data(tasvir_area_desc *d) { return d->h + 1; }
 
 /**
- *
- */
-static inline tasvir_log_t *tasvir_data2logunit(const void *data) {
-    const uint64_t extract_mask = (TASVIR_SIZE_DATA - 1) & (~0UL << TASVIR_SHIFT_UNIT);
-    return (tasvir_log_t *)TASVIR_ADDR_LOG + _pext_u64((uintptr_t)data, extract_mask);
-}
-
-/**
- *
- */
-static inline uint16_t tasvir_data2logbit(const void *data) {
-    if (TASVIR_SHIFT_BIT == 8)
-        return (uint8_t)((uintptr_t)data >> TASVIR_SHIFT_BIT);
-    else
-        return _pext_u64((uintptr_t)data, ((1UL << TASVIR_SHIFT_UNIT) - 1) & (~0UL << TASVIR_SHIFT_BIT));
-}
-
-/**
  * @brief
- *   Get a shadow pointer corresponding to a given data pointer.
+ *   Get the shadow pointer of the data pointer.
  *
  * @param data
  *   Data pointer.
@@ -302,6 +290,28 @@ static inline uint16_t tasvir_data2logbit(const void *data) {
  *   Shadow pointer.
  */
 static inline void *tasvir_data2shadow(void *data) { return (uint8_t *)data + TASVIR_OFFSET_SHADOW; }
+
+/**
+ * @brief
+ *   Get the pointer to the reader version of to the data pointer.
+ *
+ * @param data
+ *   Data pointer.
+ * @return
+ *   Reader pointer.
+ */
+static inline void *tasvir_data2ro(void *data) { return (uint8_t *)data + TASVIR_OFFSET_RO; }
+
+/**
+ * @brief
+ *   Get the pointer to the writer version of to the data pointer.
+ *
+ * @param data
+ *   Data pointer.
+ * @return
+ *   Writer pointer.
+ */
+static inline void *tasvir_data2rw(void *data) { return (uint8_t *)data + TASVIR_OFFSET_RW; }
 
 /**
  * @brief
@@ -313,60 +323,37 @@ static inline void *tasvir_data2shadow(void *data) { return (uint8_t *)data + TA
  *   Change size in bytes.
  */
 static inline void tasvir_log(const void *__restrict data, size_t len) {
-#ifndef TASVIR_LOG_IMPL_ALT
-    const void *__restrict data1 = (uint8_t *)data + len - 1;
-    tasvir_log_t *__restrict log = tasvir_data2logunit(data);
-    tasvir_log_t *__restrict log1 = tasvir_data2logunit(data1);
-    uint16_t logbit_idx = tasvir_data2logbit(data);
-    uint16_t logbit_idx1 = tasvir_data2logbit(data1);
-    tasvir_log_t mask = ~(tasvir_log_t)0 >> logbit_idx;
-    tasvir_log_t mask1 = ((1L << 63) >> logbit_idx1);
+    /* find the start and end bit offset in the log corresponding to start and end of the */
+    size_t logbit_idx = _pext_u64((uintptr_t)data, (TASVIR_SIZE_DATA - 1) & (~0UL << TASVIR_SHIFT_BIT));
+    size_t logbit_idx1 = _pext_u64((uintptr_t)data + len - 1, (TASVIR_SIZE_DATA - 1) & (~0UL << TASVIR_SHIFT_BIT));
 
-    if (log == log1) {
-        tasvir_log_t val = *log | (mask & mask1);
-        if (*log != val)
-            *log = val;
+    size_t logunit_idx = logbit_idx >> (TASVIR_SHIFT_UNIT - TASVIR_SHIFT_BIT);
+    size_t logunit_idx1 = logbit_idx1 >> (TASVIR_SHIFT_UNIT - TASVIR_SHIFT_BIT);
+
+    size_t logdiff = logunit_idx1 - logunit_idx;
+    tasvir_log_t *__restrict log = (tasvir_log_t *)TASVIR_ADDR_LOG + logunit_idx;
+
+    tasvir_log_t mask = ~(tasvir_log_t)0 >> (logbit_idx % TASVIR_LOG_UNIT_BITS);
+    tasvir_log_t mask1 = (1L << 63) >> (logbit_idx1 % TASVIR_LOG_UNIT_BITS);
+
+    if (likely(!logdiff)) {
+        tasvir_log_t val_new = *log | (mask & mask1);
+        if (*log != val_new)  // save coherency+write traffic; only doing it in the common case
+            *log = val_new;
     } else {
-        tasvir_log_t val = *log | mask;
-        if (*log != val)
-            *log = val;
-        if (++log != log1)
-            memset(log, ~0, (uintptr_t)log1 - (uintptr_t)log);
-        val = *log1 | mask1;
-        if (*log1 != val)
-            *log1 = val;
+        tasvir_log_t *__restrict log_end = log + logdiff;
+        *log |= mask;
+        *log_end |= mask1;
+        memset(log + 1, ~0, logdiff - 1);
+        // while (++log < log_end)
+        //     *log = ~(tasvir_log_t)0;
     }
-#else
-    /* prefer the above impl to this */
-    tasvir_log_t *__restrict log = tasvir_data2logunit(data);
-    uint16_t logbit_idx = tasvir_data2logbit(data);
-
-    /* rounding up len to correctly find the last log unit */
-    len += ((uintptr_t)data % TASVIR_LOG_GRANULARITY_BYTES) + TASVIR_LOG_GRANULARITY_BYTES - 1;
-    size_t nr_bits = len >> TASVIR_SHIFT_BIT;
-    tasvir_log_t mask;
-
-    if (logbit_idx + nr_bits <= 64) {
-        mask = ((uint64_t)((1L << 63) >> (nr_bits - 1)) >> logbit_idx);
-        if ((*log & mask) != mask)  // saves unnecessary write traffic
-            *log |= mask;
-    } else {
-        *log |= (tasvir_log_t)~0 >> logbit_idx;
-        log++;
-        nr_bits -= 64 - logbit_idx;
-        while (nr_bits > 64) {
-            *log = (tasvir_log_t)~0;
-            log++;
-            nr_bits -= 64;
-        }
-        *log |= ((1L << 63) >> (nr_bits - 1));
-    }
-#endif
 
 #ifdef TASVIR_DEBUG_TRACKING
     fprintf(stderr, "%16d %-22.22s %p (%luB) log/offset:%p/%u\n", 0, "tasvir_log", data, len, (void *)log, logbit_idx);
 #endif
 }
+
 #ifdef __cplusplus
 }
 #endif

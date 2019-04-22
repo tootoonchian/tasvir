@@ -1,10 +1,17 @@
 cmake_minimum_required(VERSION 3.3)
 
-include(GNUInstallDirs)
+project(tasvir VERSION 0.1.0 DESCRIPTION "Tasvir: A Shared View Network Interface")
 
-if(NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Choose the build type: Debug Release RelWithDebInfo MinSizeRel." FORCE)
+if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    message(STATUS "Setting build type to RelWithDebInfo as none was specified.")
+    set(CMAKE_BUILD_TYPE "RelWithDebInfo" CACHE STRING "Build type (default RelWithDebInfo)" FORCE)
 endif()
+
+string(REPLACE "-O2 -g" "-O3 -ggdb3" CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITHDEBINFO}")
+string(REPLACE "-O2 -g" "-O3 -ggdb3" CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO}")
+set(CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITHDEBINFO}" CACHE STRING "" FORCE)
+set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO}" CACHE STRING "" FORCE)
+
 if(${CMAKE_SOURCE_DIR} STREQUAL ${CMAKE_BINARY_DIR})
     message(FATAL_ERROR "Please invoke cmake from a build directory outside of the source directory: e.g., mkdir build; cmake ..")
 endif()
@@ -15,7 +22,7 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_ON)
 
-project(tasvir VERSION 0.1.0 DESCRIPTION "Tasvir: A Shared View Network Interface")
+include(GNUInstallDirs)
 
 if(NOT DEFINED ENV{RTE_SDK})
     message(FATAL_ERROR "Undefined RTE_SDK env var.")
@@ -30,18 +37,24 @@ endif()
 include_directories(tasvir_obj SYSTEM PUBLIC $ENV{RTE_SDK}/$ENV{RTE_TARGET}/include)
 link_directories($ENV{RTE_SDK}/$ENV{RTE_TARGET}/lib)
 
+if (NOT DEFINED ENV{TASVIR_LOG_LEVEL})
+    set(TASVIR_LOG_LEVEL 7)
+endif()
+
 set(TASVIR_COMPILE_OPTIONS
     -Wall -Wextra -pedantic
     -march=native
     -D_GNU_SOURCE=1
-    -ffast-math -flto
+    -DTASVIR
+    -DTASVIR_LOG_LEVEL=${TASVIR_LOG_LEVEL}
+    -ffast-math
+    -flto
     -fvisibility=hidden
     $<$<COMPILE_LANGUAGE:C>:-D_POSIX_C_SOURCE=200809L>
     $<$<COMPILE_LANGUAGE:CXX>:-fno-rtti>
     $<$<COMPILE_LANGUAGE:CXX>:-D__STDC_LIMIT_MACROS>
-    # -fno-tree-loop-distribute-patterns
-    $<$<C_COMPILER_ID:GNU>:-fno-semantic-interposition -fdiagnostics-color=always -fuse-linker-plugin>
-    $<$<C_COMPILER_ID:Clang>:-fcolor-diagnostics -Wno-gnu-zero-variadic-macro-arguments>
+    $<$<C_COMPILER_ID:GNU>:-fno-tree-loop-distribute-patterns -fno-semantic-interposition -fdiagnostics-color=always -fuse-linker-plugin>
+    $<$<C_COMPILER_ID:Clang>:-fcolor-diagnostics -Wno-gnu-zero-variadic-macro-arguments -Wno-address-of-packed-member>
     )
 set(TASVIR_LINK_OPTIONS
     -flto
@@ -106,8 +119,3 @@ endmacro(add_tasvir_exec)
 
 add_subdirectory(apps)
 add_subdirectory(doc)
-
-string(REPLACE "-O2" "-O3" CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITHDEBINFO}")
-string(REPLACE "-O2" "-O3" CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO}")
-set(CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITHDEBINFO}" CACHE STRING "" FORCE)
-set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO}" CACHE STRING "" FORCE)

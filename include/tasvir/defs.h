@@ -22,9 +22,9 @@
 #define TASVIR_STATIC_ASSERT _Static_assert
 #endif
 
-#define TASVIR_BARRIER_ENTER_US (50)        /**< Time (microseconds) to wait in the sync barrier */
-#define TASVIR_STAT_US (1 * 1000 * 1000)    /**< Time (microseconds) between updating and printing average statistics */
-#define TASVIR_SYNC_INTERNAL_US (50 * 1000) /**< Time (microseconds) between internal synchronization intervals */
+#define TASVIR_BARRIER_ENTER_US (50)     /**< Time (microseconds) to wait in the sync barrier */
+#define TASVIR_STAT_US (1 * 1000 * 1000) /**< Time (microseconds) between updating and printing average statistics */
+#define TASVIR_SYNC_INTERNAL_US (100 * 1000)  /**< Time (microseconds) between internal synchronization intervals */
 #define TASVIR_SYNC_EXTERNAL_US (250 * 1000)  /**< Time (microseconds) between external synchronization intervals */
 #define TASVIR_HEARTBEAT_US (1 * 1000 * 1000) /**< Time (microseconds) after which a node may be announced dead */
 
@@ -80,16 +80,23 @@
 #define TASVIR_ADDR_END ((uintptr_t)(TASVIR_ADDR_LOCAL + TASVIR_SIZE_LOCAL)) /**< The end virtual address */
 #define TASVIR_ADDR_ROOT_DESC \
     ((uintptr_t)(TASVIR_ADDR_SHADOW - TASVIR_HUGEPAGE_SIZE)) /**< The base virtual address for the root descriptor */
-#define TASVIR_ADDR_DPDK_BASE \
-    ((uintptr_t)(TASVIR_ADDR_END + TASVIR_HUGEPAGE_SIZE)) /**< The end virtual address for DPDK */
-// #define TASVIR_ADDR_DATA_RW ((uintptr_t)(TASVIR_ADDR_END)) /**< The base virtual address for the data region */
-// #define TASVIR_ADDR_DATA_RO ((uintptr_t)(TASVIR_ADDR_DATA_RW + TASVIR_SIZE_DATA + 96)) /**< The base virtual address
-// for the shadow region */
 
+#define TASVIR_SIZE_WHOLE TASVIR_ADDR_END - TASVIR_ADDR_BASE
+
+#define TASVIR_ADDR_BASE2 TASVIR_ADDR_END
+#define TASVIR_ADDR_DATA2 (TASVIR_ADDR_BASE2 + TASVIR_ADDR_DATA - TASVIR_ADDR_BASE)
+#define TASVIR_ADDR_SHADOW2 (TASVIR_ADDR_BASE2 + TASVIR_ADDR_SHADOW - TASVIR_ADDR_BASE)
+#define TASVIR_ADDR_END2 (TASVIR_ADDR_BASE2 + TASVIR_SIZE_WHOLE)
+
+#define TASVIR_ADDR_DPDK_BASE \
+    ((uintptr_t)(TASVIR_ADDR_END2 + TASVIR_HUGEPAGE_SIZE)) /**< The end virtual address for DPDK */
+
+#define TASVIR_OFFSET_RO (TASVIR_ADDR_DATA2 - TASVIR_ADDR_DATA)
+#define TASVIR_OFFSET_RW (TASVIR_ADDR_SHADOW2 - TASVIR_ADDR_DATA)
 #define TASVIR_OFFSET_SHADOW (TASVIR_ADDR_SHADOW - TASVIR_ADDR_DATA)
 #define TASVIR_OFFSET_LOG (TASVIR_ADDR_LOG - TASVIR_ADDR_DATA)
 
-/* From: http://ptspts.blogspot.com/2013/11/how-to-apply-macro-to-all-arguments-of.html */
+/* source: http://ptspts.blogspot.com/2013/11/how-to-apply-macro-to-all-arguments-of.html */
 #define TASVIR_NUM_ARGS_H1(dummy, x6, x5, x4, x3, x2, x1, x0, ...) x0
 #define TASVIR_NUM_ARGS(...) TASVIR_NUM_ARGS_H1(dummy, ##__VA_ARGS__, 6, 5, 4, 3, 2, 1, 0)
 #define TASVIR_APPLY0(t, dummy)

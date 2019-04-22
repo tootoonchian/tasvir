@@ -18,27 +18,95 @@
 
 #define MS2US (1000)
 #define S2US (1000 * MS2US)
+#define KB 1000
+#define MB (1000 * KB)
+#define GB (1000 * MB)
 
 static inline uint64_t tasvir_tsc2usec(uint64_t tsc) { return tsc * ttld.ndata->tsc2usec_mult; }
 static inline uint64_t tasvir_usec2tsc(uint64_t us) { return us / ttld.ndata->tsc2usec_mult; }
-static inline uint64_t tasvir_gettime_us() { return tasvir_tsc2usec(__rdtsc()); }
+static inline uint64_t tasvir_time_us() { return tasvir_tsc2usec(__rdtsc()); }
+static inline uint64_t tasvir_time_boot_us() { return tasvir_tsc2usec(__rdtsc()) - ttld.ndata->boot_us; }
+
+static inline tasvir_log_t *tasvir_data2log(void *data) {
+    return (tasvir_log_t *)TASVIR_ADDR_LOG +
+           _pext_u64((uintptr_t)data, (TASVIR_SIZE_DATA - 1) & (~0UL << TASVIR_SHIFT_UNIT));
+}
 
 /* copy/strem */
 
-__attribute__((unused)) static inline void tasvir_memset_stream(void *dst, char c, size_t len) {
+static inline void tasvir_memset_stream(void *dst, char c, size_t len) {
     uint8_t *ptr = dst;
-    while ((uintptr_t)ptr & 31UL) {
+#ifdef __AVX512F__
+    __m512i m = _mm512_set1_epi8(c);
+#elif __AVX2__
+    __m256i m = _mm256_set1_epi8(c);
+#elif __AVX__
+    __m128i m = _mm_set1_epi8(c);
+#endif
+    while ((uintptr_t)ptr & (TASVIR_VEC_BYTES - 1)) {
         *ptr = c;
         ptr++;
     }
-    __m256i m = _mm256_set1_epi8(c);
-    while (len >= 32) {
+    while (len >= TASVIR_VEC_BYTES) {
+#ifdef __AVX512F__
+        _mm512_stream_si512((__m512i *)ptr, m);
+#elif __AVX2__
         _mm256_stream_si256((__m256i *)ptr, m);
-        ptr += 32;
-        len -= 32;
+#elif __AVX__
+        _mm_stream_si128((__m128i *)ptr, m);
+#endif
+        ptr += TASVIR_VEC_BYTES;
+        len -= TASVIR_VEC_BYTES;
     }
     while (len-- > 0)
         *ptr++ = c;
+}
+
+static inline void tasvir_store_vec(void *__restrict dst, const void *__restrict src) {
+    dst = __builtin_assume_aligned(dst, TASVIR_VEC_BYTES);
+    src = __builtin_assume_aligned(src, TASVIR_VEC_BYTES);
+#ifdef __AVX512F__
+    _mm512_store_si512((__m512i *)dst, _mm512_load_si512((__m512i *)src));
+#elif __AVX2__
+    _mm256_store_si256((__m256i *)dst, _mm256_load_si256((__m256i *)src));
+#elif __AVX__
+    _mm_store_si128((__m128i *)dst, _mm_load_si128((__m128i *)src));
+#endif
+    // _mm_clwb(dst);
+}
+
+static inline void tasvir_stream_vec(void *__restrict dst, const void *__restrict src) {
+    dst = __builtin_assume_aligned(dst, TASVIR_VEC_BYTES);
+    src = __builtin_assume_aligned(src, TASVIR_VEC_BYTES);
+#ifdef __AVX512F__
+    _mm512_stream_si512((__m512i *)dst, _mm512_stream_load_si512((__m512i *)src));
+#elif __AVX2__
+    _mm256_stream_si256((__m256i *)dst, _mm256_stream_load_si256((__m256i *)src));
+#elif __AVX__
+    _mm_stream_si128((__m128i *)dst, _mm_stream_load_si128((__m128i *)src));
+#endif
+}
+
+static inline void tasvir_store_vec_rep(void *__restrict dst, const void *__restrict src, size_t len) {
+    dst = __builtin_assume_aligned(dst, TASVIR_VEC_BYTES);
+    src = __builtin_assume_aligned(src, TASVIR_VEC_BYTES);
+    void *dst_end = (void *)((uintptr_t)dst + len);
+    do {
+        tasvir_store_vec(dst, src);
+        dst = (uint8_t *)dst + TASVIR_VEC_BYTES;
+        src = (uint8_t *)src + TASVIR_VEC_BYTES;
+    } while (dst < dst_end);
+}
+
+static inline void tasvir_stream_vec_rep(void *__restrict dst, const void *__restrict src, size_t len) {
+    dst = __builtin_assume_aligned(dst, TASVIR_VEC_BYTES);
+    src = __builtin_assume_aligned(src, TASVIR_VEC_BYTES);
+    void *dst_end = (void *)((uintptr_t)dst + len);
+    do {
+        tasvir_stream_vec(dst, src);
+        dst = (uint8_t *)dst + TASVIR_VEC_BYTES;
+        src = (uint8_t *)src + TASVIR_VEC_BYTES;
+    } while (dst < dst_end);
 }
 
 /* logging */

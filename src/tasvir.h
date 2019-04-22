@@ -31,6 +31,8 @@
 
 #include <tasvir/tasvir.h>
 
+#define TASVIR_CHANGES_PER_SYNC 64 * 1024
+
 typedef enum {
     TASVIR_THREAD_STATE_INVALID = 0,
     TASVIR_THREAD_STATE_DEAD,
@@ -134,7 +136,7 @@ typedef enum {
 
 // static const char *tasvir_msg_src_str[] = {"invalid", "me", "local", "net2us", "net2root"};
 
-struct __attribute__((aligned(8))) tasvir_local_tdata { /* thread data */
+struct __attribute__((aligned(TASVIR_CACHELINE_BYTES))) tasvir_local_tdata { /* thread data */
     uint64_t time_us;
     struct rte_ring *ring_tx;
     struct rte_ring *ring_rx;
@@ -144,21 +146,34 @@ struct __attribute__((aligned(8))) tasvir_local_tdata { /* thread data */
     size_t next_sync_seq;          /* next sync sequence number. updated by daemon only. */
 };
 
-struct tasvir_sync_job {
+/* set prior to sync by daemon and concurrently updated by all during sync */
+struct __attribute__((aligned(TASVIR_CACHELINE_BYTES))) tasvir_sync_job {
     tasvir_area_desc *d;
-    bool done;
-    bool admit;
+    bool self_sync;
+    bool done_stage1; // walking the log
+    bool done_stage2; // updating the header
+    bool done_stage3; // postprocessing
     atomic_size_t offset __attribute__((aligned(TASVIR_CACHELINE_BYTES)));
     atomic_size_t bytes_seen;
     atomic_size_t bytes_updated;
 };
 
-struct __attribute__((aligned(8))) tasvir_local_ndata { /* node data */
+typedef struct tasvir_sync_item {
+    uint32_t offset_scaled;
+    uint32_t len_scaled;
+} tasvir_sync_item;
+
+typedef struct __attribute__((aligned(TASVIR_CACHELINE_BYTES))) tasvir_sync_list {
+    int changed;
+    int cnt;
+    tasvir_sync_item l[TASVIR_CHANGES_PER_SYNC];
+} tasvir_sync_list;
+
+struct __attribute__((aligned(TASVIR_CACHELINE_BYTES))) tasvir_local_ndata { /* node data */
     uint64_t boot_us;
     uint64_t time_us;
     uint64_t sync_int_us;
     uint64_t sync_ext_us;
-    uint64_t job_bytes;
     double tsc2usec_mult;
     struct rte_mempool *mp;
 
@@ -185,15 +200,19 @@ struct __attribute__((aligned(8))) tasvir_local_ndata { /* node data */
     tasvir_stats stats_cur;
     tasvir_stats stats;
 
+    /* sync jobs */
+    size_t job_bytes;
     size_t nr_jobs;
     tasvir_sync_job jobs[TASVIR_NR_SYNC_JOBS];
 
+    /* thread to daemon requests */
     bool sync_req;
     bool stat_reset_req;
     bool stat_update_req;
 
     /* thread data */
     tasvir_local_tdata tdata[TASVIR_NR_THREADS_LOCAL];
+    tasvir_sync_list sync_list[TASVIR_NR_THREADS_LOCAL];
 };
 
 /* thread-internal data */

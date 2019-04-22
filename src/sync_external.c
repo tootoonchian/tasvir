@@ -188,7 +188,7 @@ int tasvir_sync_external() {
 
     ttld.ndata->last_sync_ext_start = ttld.ndata->time_us;
     size_t retval = tasvir_area_walk(ttld.root_desc, &tasvir_sync_external_area_noinit);
-    ttld.ndata->time_us = tasvir_gettime_us();
+    ttld.ndata->time_us = tasvir_time_us();
     ttld.ndata->last_sync_ext_end = ttld.ndata->time_us;
     return retval > 0 ? 0 : -1;
 }

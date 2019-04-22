@@ -38,6 +38,7 @@ static void tasvir_service_msg_rpc_response(tasvir_msg_rpc *m) {
         rs->response = m;
 }
 
+#ifdef TASVIR_DAEMON
 static inline void tasvir_service_msg_mem(tasvir_msg_mem *m) {
     /* TODO: log_write and sync */
     if (m->addr) {
@@ -63,11 +64,11 @@ static inline void tasvir_service_msg_mem(tasvir_msg_mem *m) {
 
     rte_mempool_put(ttld.ndata->mp, (void *)m);
 }
+#endif
 
 /* FIXME: not robust */
 int tasvir_service_msg(tasvir_msg *m, tasvir_msg_src src) {
     if (!m) {
-        LOG_ERR("how can an empty message get here?")
         abort();
     }
     bool is_src_me = src == TASVIR_MSG_SRC_ME;
@@ -201,7 +202,7 @@ static void tasvir_service_io() {
 
 int tasvir_service() {
     /* upadte check-in time */
-    ttld.tdata->time_us = tasvir_gettime_us();  // FIXME: assuming invariant tsc
+    ttld.tdata->time_us = tasvir_time_us();  // FIXME: assuming invariant tsc
 
     /* service internal rings and NIC ports */
     tasvir_service_io();
@@ -248,12 +249,13 @@ int tasvir_service() {
     return -1;
 }
 
-int tasvir_service_wait(uint64_t timeout_us) {
+int tasvir_service_wait(uint64_t timeout_us, bool force) {
     int rc = -1;
     uint64_t end_tsc = __rdtsc() + tasvir_usec2tsc(timeout_us);
     while (__rdtsc() < end_tsc && (rc = tasvir_service()) != 0) {
-        // _mm_pause();
-        ttld.ndata->sync_req = true;
+        _mm_pause();
+        if (force)
+            ttld.ndata->sync_req = true;
     }
     return rc;
 }
