@@ -34,14 +34,11 @@ if(NOT EXISTS $ENV{RTE_SDK}/$ENV{RTE_TARGET})
     message(FATAL_ERROR "DPDK directory path $ENV{RTE_SDK}/$ENV{RTE_TARGET} does not exist.")
 endif()
 
-include_directories(tasvir_obj SYSTEM PUBLIC $ENV{RTE_SDK}/$ENV{RTE_TARGET}/include)
-link_directories($ENV{RTE_SDK}/$ENV{RTE_TARGET}/lib)
-
 if (NOT DEFINED ENV{TASVIR_LOG_LEVEL})
     set(TASVIR_LOG_LEVEL 7)
 endif()
 
-set(TASVIR_COMPILE_OPTIONS
+set(TASVIR_COMPILE_OPTS
     -Wall -Wextra -pedantic
     -march=native
     -D_GNU_SOURCE=1
@@ -56,40 +53,45 @@ set(TASVIR_COMPILE_OPTIONS
     $<$<C_COMPILER_ID:GNU>:-fno-tree-loop-distribute-patterns -fno-semantic-interposition -fdiagnostics-color=always -fuse-linker-plugin>
     $<$<C_COMPILER_ID:Clang>:-fcolor-diagnostics -Wno-gnu-zero-variadic-macro-arguments -Wno-address-of-packed-member>
     )
-set(TASVIR_LINK_OPTIONS
-    -flto
-    $<$<C_COMPILER_ID:GNU>:-fuse-linker-plugin>
-    )
+set(TASVIR_LINK_DIRS "$ENV{RTE_SDK}/$ENV{RTE_TARGET}/lib")
+set(TASVIR_LINK_LIBS dl m numa rt pthread "-Wl,--whole-archive -ldpdk -Wl,--no-whole-archive")
+set(TASVIR_LINK_OPTS -flto $<$<C_COMPILER_ID:GNU>:-fuse-linker-plugin>)
 
-file(GLOB_RECURSE tasvir_public_headers include/*)
-set(tasvir_src src/area.c src/dpdk.c src/init.c src/rpc.c src/service.c src/stat.c src/sync_internal.c src/tasvir.h src/utils.h)
-add_library(tasvir_obj OBJECT ${tasvir_src})
+file(GLOB_RECURSE TASVIR_HDR include/*)
+set(TASVIR_SRC src/area.c src/dpdk.c src/init.c src/rpc.c src/service.c src/stat.c src/sync.c src/sync_internal.c src/utils.c src/tasvir.h src/utils.h)
+
+add_library(tasvir_obj OBJECT ${TASVIR_SRC})
 target_compile_features(tasvir_obj PUBLIC c_std_11 cxx_std_11)
-target_compile_options(tasvir_obj PUBLIC ${TASVIR_COMPILE_OPTIONS})
+target_compile_options(tasvir_obj PUBLIC ${TASVIR_COMPILE_OPTS})
 target_include_directories(tasvir_obj PUBLIC include)
-target_link_libraries(tasvir_obj PUBLIC dl m numa rt pthread "-Wl,--whole-archive -ldpdk -Wl,--no-whole-archive" ${TASVIR_LINK_OPTIONS})
-set_target_properties(tasvir_obj PROPERTIES POSITION_INDEPENDENT_CODE ON PUBLIC_HEADER "${tasvir_public_headers}" VERSION ${PROJECT_VERSION})
+target_include_directories(tasvir_obj SYSTEM PUBLIC $ENV{RTE_SDK}/$ENV{RTE_TARGET}/include)
+target_link_directories(tasvir_obj PUBLIC ${TASVIR_LINK_DIRS})
+target_link_libraries(tasvir_obj PUBLIC ${TASVIR_LINK_LIBS})
+target_link_options(tasvir_obj PUBLIC ${TASVIR_LINK_OPTS})
+set_target_properties(tasvir_obj PROPERTIES POSITION_INDEPENDENT_CODE ON PUBLIC_HEADER "${TASVIR_HDR}" VERSION ${PROJECT_VERSION})
 
-add_library(tasvir SHARED $<TARGET_OBJECTS:tasvir_obj>)
-target_link_libraries(tasvir PUBLIC tasvir_obj)
-set_target_properties(tasvir PROPERTIES POSITION_INDEPENDENT_CODE ON PUBLIC_HEADER "${tasvir_public_headers}" VERSION ${PROJECT_VERSION})
-
-add_library(tasvir_static STATIC $<TARGET_OBJECTS:tasvir_obj>)
-target_link_libraries(tasvir_static PUBLIC tasvir_obj)
-set_target_properties(tasvir_static PROPERTIES POSITION_INDEPENDENT_CODE ON PUBLIC_HEADER "${tasvir_public_headers}" VERSION ${PROJECT_VERSION})
-
-set(tasvir_src_daemon ${tasvir_src} src/daemon.c src/sync_external.c)
-add_executable(tasvir_daemon ${tasvir_src_daemon})
+add_executable(tasvir_daemon ${TASVIR_SRC} src/daemon.c src/sync_external.c)
 target_compile_definitions(tasvir_daemon PRIVATE TASVIR_DAEMON=1)
-set_target_properties(tasvir_daemon PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_compile_features(tasvir_daemon PRIVATE c_std_11 cxx_std_11)
-target_compile_options(tasvir_daemon PRIVATE ${TASVIR_COMPILE_OPTIONS})
+target_compile_options(tasvir_daemon PRIVATE ${TASVIR_COMPILE_OPTS})
 target_include_directories(tasvir_daemon PRIVATE include)
-target_link_libraries(tasvir_daemon PRIVATE dl m numa rt pthread "-Wl,--whole-archive -ldpdk -Wl,--no-whole-archive" ${TASVIR_LINK_OPTIONS})
+target_include_directories(tasvir_daemon SYSTEM PRIVATE $ENV{RTE_SDK}/$ENV{RTE_TARGET}/include)
+target_link_directories(tasvir_daemon PRIVATE ${TASVIR_LINK_DIRS})
+target_link_libraries(tasvir_daemon PRIVATE ${TASVIR_LINK_LIBS})
+target_link_options(tasvir_daemon PRIVATE ${TASVIR_LINK_OPTS})
+set_target_properties(tasvir_daemon PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-install(TARGETS tasvir
-        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-        PUBLIC_HEADER DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/tasvir)
+#add_library(tasvir SHARED $<TARGET_OBJECTS:tasvir_obj>)
+#target_link_libraries(tasvir PUBLIC tasvir_obj)
+#set_target_properties(tasvir PROPERTIES POSITION_INDEPENDENT_CODE ON PUBLIC_HEADER "${TASVIR_HDR}" VERSION ${PROJECT_VERSION})
+
+#add_library(tasvir_static STATIC $<TARGET_OBJECTS:tasvir_obj>)
+#target_link_libraries(tasvir_static PUBLIC tasvir_obj)
+#set_target_properties(tasvir_static PROPERTIES POSITION_INDEPENDENT_CODE ON PUBLIC_HEADER "${TASVIR_HDR}" VERSION ${PROJECT_VERSION})
+
+#install(TARGETS tasvir
+#        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+#        PUBLIC_HEADER DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/tasvir)
 install(TARGETS tasvir_daemon
         DESTINATION ${CMAKE_BINARY_DIR})
 install(FILES ${CMAKE_BINARY_DIR}/tasvir.pc

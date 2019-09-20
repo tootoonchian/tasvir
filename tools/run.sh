@@ -1,6 +1,6 @@
 #!/bin/bash
 
-[[ "$TRACE"  ]] && set -x
+[[ "$TRACE"  -eq 1 ]] && set -x
 
 COMPILER=${COMPILER:-gcc}
 if [[ "$COMPILER" == gcc ]]; then
@@ -16,36 +16,47 @@ fi
 RUNSCRIPT=$(realpath "${BASH_SOURCE[0]}")
 SCRIPTDIR=$(dirname "$RUNSCRIPT")
 LOGDIR=$SCRIPTDIR/log
-DPDK_DRIVER=${DPDK_DRIVER:-igb_uio}
+DPDK_DRIVER=${DPDK_DRIVER:-vfio-pci}
 TASVIR_SRCDIR=$(realpath "$SCRIPTDIR/..")
 TASVIR_CONFDIR=$TASVIR_SRCDIR/etc
 TASVIR_CONF=$TASVIR_CONFDIR/tasvir.conf
 TASVIR_BUILDDIR=$TASVIR_SRCDIR/build.$COMPILER
 TASVIR_BINDIR=$TASVIR_BUILDDIR/bin
 PIDFILE_PREFIX=/var/run/tasvir-
-RTE_SDK=${RTE_SDK:-/srv/resq/nf/dpdk-v19.02}
+DPDK_INIT=$(test -z "$RTE_SDK" && echo 1 || echo 0)
+RTE_SDK=${RTE_SDK:-$TASVIR_SRCDIR/third_party/dpdk}
+RTE_TARGET=${RTE_TARGET:-x86_64-native-linuxapp-gcc}
+
+nr_hugepages=1050
 
 prepare() {
     sync
-    local nr_hugepages=1050
-    echo never >/sys/kernel/mm/transparent_hugepage/enabled
-    echo never >/sys/kernel/mm/transparent_hugepage/defrag
-    sysctl vm.nr_hugepages=$nr_hugepages &>/dev/null
-
-    modprobe "$DPDK_DRIVER" &>/dev/null
-    if [[ ${HOST_NIC[$HOSTNAME]} = *"bonding="*  ]]; then
-        echo "${HOST_NIC[$HOSTNAME]}" | sed 's/slave=/\n/g' | sed 's/,.*//g' | grep ^0000: | while read -r i; do
-            "$RTE_SDK/usertools/dpdk-devbind.py" --force -b "$DPDK_DRIVER" "$i" &>/dev/null
-        done
-    else
-        "$RTE_SDK/usertools/dpdk-devbind.py" --force -b "$DPDK_DRIVER" "${HOST_NIC[$HOSTNAME]}" &>/dev/null
-    fi
-
+    ## cleanup after a previous run
     for pidfile in "${PIDFILE_PREFIX}"*; do
         start-stop-daemon --stop --retry 3 --remove-pidfile --pidfile "$pidfile" &>/dev/null
     done
     rm -f /dev/shm/tasvir /dev/hugepages/tasvir* /var/run/.tasvir_config &>/dev/null
 
+    sysctl vm.nr_hugepages=$nr_hugepages &>/dev/null
+    pkill -f "tail.*-f.*.$HOSTNAME"
+    mkdir "$LOGDIR" &>/dev/null
+    while ! egrep -q "HugePages_Free:\s+$nr_hugepages" /proc/meminfo; do
+        echo $HOSTNAME: Waiting for hugepages to be free
+        sleep 2
+    done
+
+    ## load dpdk driver and bind the relevant NIC
+    modprobe "$DPDK_DRIVER" &>/dev/null
+    if [[ ${HOST_NIC[$HOSTNAME]} = *"bonding="*  ]]; then
+        echo "${HOST_NIC[$HOSTNAME]}" | sed 's/slave=/\n/g' | sed 's/,.*//g' | grep ^0000: | while read -r i; do
+            driverctl set-override "$i" "$DPDK_DRIVER" &>/dev/null
+        done
+    else
+        driverctl set-override "${HOST_NIC[$HOSTNAME]}" "$DPDK_DRIVER" #&>/dev/null
+    fi
+
+    ## improve reproducibility
+    service irqbalance stop
     # echo 1 > /proc/sys/kernel/randomize_va_space
     echo 1 > /sys/module/processor/parameters/ignore_ppc
     echo 0 > /proc/sys/kernel/nmi_watchdog
@@ -73,17 +84,15 @@ prepare() {
         fi
     done &>/dev/null
     [ -f /sys/devices/system/cpu/cpufreq/boost ] && echo 0 > /sys/devices/system/cpu/cpufreq/boost
-    # disable uncore frequency scaling
-    wrmsr -a 0x620 0x1d1d
-    pkill -f "tail.*-f.*.$HOSTNAME"
-    mkdir "$LOGDIR" &>/dev/null
-    while ! egrep -q "HugePages_Free:\s+$nr_hugepages" /proc/meminfo; do
-        echo $HOSTNAME: Waiting for hugepages to be free
-        sleep 2
-    done
-    service irqbalance stop
+    modprobe msr
+    wrmsr -a 0x620 0x1d1d # disable uncore frequency scaling
+    # wrmsr -a 0x1a4 0x0 # enable prefetchers
 
-    sync
+    # tph is bad for reproducibility but experimentally here for RO/RW mappings
+    echo madvise >/sys/kernel/mm/transparent_hugepage/enabled
+    echo madvise >/sys/kernel/mm/transparent_hugepage/defrag
+    echo advise >/sys/kernel/mm/transparent_hugepage/shmem_enabled
+
     date > /tmp/prepare.done
 }
 
@@ -102,15 +111,17 @@ compile() {
 generate_cmd() {
     generate_cmd_worker() {
         local pidfile=${PIDFILE_PREFIX}%WID%.pid
+        local env="TASVIR_CORE=%CORE%"
         if [ "$DEBUG" = 1 ]; then
             local gdbcmd="gdb -q -ex set\ pagination\ off -ex run "
             [ -f gdb.cmds ] && gdbcmd+="--command gdb.cmds "
             gdbcmd+="--args"
             cmd_worker="echo \$\$ > $pidfile; "
-            cmd_worker+="/usr/bin/script -f -c \"exec /usr/bin/numactl -a -l -C %CORE% $gdbcmd $*\" $logfile"
+            cmd_worker+="/usr/bin/script -f -c \"$env exec /usr/bin/numactl -a -l -C %CORE% $gdbcmd $*\" $logfile"
         else
             cmd_worker="start-stop-daemon --background --start --make-pidfile --pidfile $pidfile --startas "
-            cmd_worker+="/usr/bin/script -- -f -c \"exec /usr/bin/numactl -a -l -C %CORE% $*\" $logfile; "
+            cmd_worker+="/usr/bin/script -- -f -c \"$env exec /usr/bin/numactl -a -l -C %CORE% $*\" $logfile; "
+            #[ $wid = d -o $wid = 0 ] && \
             cmd_worker+="sleep 0.1; stdbuf -o 0 -e 0 tail -n 1000 -f $logfile"
         fi
         cmd_worker=$(echo "$cmd_worker" | sed -e "s/%CORE%/$core/g" -e "s/%WID%/$wid/g" -e "s/%NR_WORKERS%/$nr_workers/g" -e "s/%HOST%/$host/g")
@@ -124,7 +135,7 @@ generate_cmd() {
     local host_list=("${host_list[@]:-${!HOST_NCORES[@]}}")
     local host=${host_list[0]}
 
-    local cmd
+    declare -g cmd
     local cmd_app="$*"
     local cmd_ssh
     local cmd_worker
@@ -135,7 +146,7 @@ generate_cmd() {
     timestamp=$(date +"%Y%m%d_%H%M%S")
     local window
     local window_idx=0
-    local logdir="$LOGDIR/$host.$timestamp"
+    declare -g logdir="$LOGDIR/$host.$timestamp"
     local manifest="$logdir/manifest"
     local logfile="$logdir/t%WID%.%HOST%"
     local nr_worker_cur=0
@@ -151,6 +162,7 @@ generate_cmd() {
             host=${host_list[$host_counter]}
             nr_worker_cur=0
             pane=0
+            window_idx=0
         fi
 
         # create a new window for every 4 panes
@@ -165,13 +177,12 @@ generate_cmd() {
         if [ $nr_worker_cur -eq 0 ]; then
             local pciaddr=${HOST_NIC[$host]}
             local cmd_daemon
+            local is_root=$(expr "$wid" = 0)
             core=$((HOST_NCORES[$host] - 1))
-            cmd_daemon="$TASVIR_BINDIR/tasvir_daemon --core %CORE% --pciaddr $pciaddr"$([ "$wid" -eq 0 ] && echo " --root")
+            cmd_daemon="/usr/bin/env TASVIR_IS_ROOT=$is_root TASVIR_CORE=%CORE% TASVIR_PCIADDR=$pciaddr $TASVIR_BINDIR/tasvir_daemon"
             local wid2=$wid
             wid=d
             cmd_ssh=$([ "$HOSTNAME" != "$host" ] && echo "ssh -o LogLevel=QUIET -tt $host")
-            window_idx=0
-            window=$host-n$nr_workers-t$timestamp-w$((window_idx++))
             generate_cmd_worker "$cmd_daemon"
             cmd+="$cmd_ssh '$cmd_worker'\\; "
             cmd+="select-pane -t '$session:$window.0' -P 'bg=colour233'\\; "
@@ -181,9 +192,8 @@ generate_cmd() {
         fi
 
         # create a new pane
-        if [ $((pane % 4)) -ne 0 ]; then
-            cmd+="split-window -t '$session:$window' "
-        fi
+        [ $((pane % 4)) -ne 0 ] && cmd+="split-window -t '$session:$window' "
+        # [ $((pane % 4)) -ne 0 ] && cmd+="new-window -t '$session' "
 
         # run the worker
         generate_cmd_worker "$cmd_app"
@@ -214,44 +224,23 @@ generate_cmd() {
     for h in $(seq 0 $host_counter); do
         cmd_prepare+="ssh -o LogLevel=QUIET -tt ${host_list[$h]} $RUNSCRIPT prepare; "
     done
-    echo "$cmd_prepare $cmd"
+    cmd="$cmd_prepare $cmd"
 }
 
-setup_env() {
-    # Timezone
-    ln -fs /usr/share/zoneinfo/America/Los_Angeles /etc/localtime
-    dpkg-reconfigure -f noninteractive tzdata
-
-    # Upgrade
-    apt-get update
-    apt-get -y upgrade
-
-    # Packages
-    apt-get install -y \
-        aptitude build-essential byobu clang clang-format clang-tidy cmake curl gdb git llvm-dev python3 python3-pip uthash-dev uuid-dev vim-nox
-    byobu-enable-prompt
-
-    # DPDK
-    cat >/etc/sysctl.d/50-dpdk.conf <<EOF
-    vm.nr_hugepages = 1050
+setup() {
+    apt -y install byobu clang cmake curl driverctl gdb ninja uthash-dev
+    if [ "$DPDK_INIT" -eq 1 ]; then
+        cd /tmp
+        curl -LO https://git.dpdk.org/dpdk/snapshot/dpdk-19.08.tar.gz
+        mkdir -p $RTE_SDK &>/dev/null
+        tar xfz dpdk-19.08.tar.gz -C $RTE_SDK --strip-components 1
+        cd $RTE_SDK
+        make -j install T=$RTE_TARGET
+        cat >/etc/sysctl.d/50-dpdk.conf <<EOF
+vm.nr_hugepages = $nr_hugepages
 EOF
-    service procps restart
-
-    # Vim
-    cat >/root/.vimrc.before.local <<EOF
-let g:spf13_bundle_groups=['general', 'writing', 'programming', 'python', 'misc', 'youcompleteme']
-let g:ycm_global_ycm_extra_conf = '~/.vim/.ycm_extra_conf.py'
-colorscheme PaperColor
-EOF
-    cat >/root/.vimrc.bundles.local <<EOF
-Bundle 'rhysd/vim-clang-format'
-Bundle 'NLKNguyen/papercolor-theme'
-EOF
-    sh <(curl https://j.mp/spf13-vim3 -L)
-    vim +BundleInstall! +BundleClean +q
-    #cp /opt/.ycm_extra_conf.py /root/.vim/
-    cd ~/.vim/bundle/YouCompleteMe || return
-    YCM_CORES=1 python3 ./install.py --clang-completer --system-libclang
+        service procps restart
+    fi
 }
 
 run_proxy() {
@@ -263,7 +252,6 @@ run_proxy() {
             . "$f"
         done
         local cmd_app="$1_cmd"
-        local cmd
         local hl="$1_host_list[@]"
         local hn="$1_host_nr_workers[@]"
         local nt="$1_nr_workers"
@@ -271,13 +259,14 @@ run_proxy() {
         host_nr_workers=("${host_nr_workers[@]:-${!hn}}")
         nr_workers=${nr_workers:-${!nt}}
         cmd_app=$(eval echo "${!cmd_app}")
-        cmd=$(generate_cmd "$cmd_app")
+        generate_cmd "$cmd_app"
+        echo logdir=$logdir
         eval "$cmd"
     fi
 }
 
-declare -A HOST_NIC
-declare -A HOST_NCORES
+declare -gA HOST_NIC
+declare -gA HOST_NCORES
 
 while read -r host ncores netdev; do
     HOST_NIC["$host"]="$netdev"

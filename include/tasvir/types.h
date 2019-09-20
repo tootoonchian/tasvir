@@ -2,7 +2,7 @@
  * @file
  *   tasvir.h
  * @brief
- *   Tasvir API.
+ *   Tasvir Types.
  *
  * @author
  *   Amin Tootoonchian
@@ -17,8 +17,6 @@
 #include <netinet/ip.h>
 #include <netinet/udp.h>
 #include <pthread.h>
-#include <rte_ether.h>
-#include <rte_mbuf.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <sys/types.h>
@@ -149,9 +147,16 @@ typedef struct tasvir_area_log {
  */
 typedef struct __attribute__((aligned(TASVIR_CACHELINE_BYTES))) tasvir_area_header {
     union {
-        uint64_t flags_;
+#ifndef __cplusplus
+        struct {
+            uint64_t flags_;
+            uint64_t last_sync_ext_bytes_;
+            uint64_t last_sync_ext_us_;
+            uint64_t last_sync_ext_v_;
+        };
+#endif
         uint8_t pad_[1 << TASVIR_SHIFT_BIT];
-    }; /* guaranteed not to be synced (local to each cached copy) */
+    }; /* guaranteed to be local (not to be synced) */
     tasvir_area_desc *d;
     uint64_t version;
     uint64_t time_us;
@@ -160,7 +165,7 @@ typedef struct __attribute__((aligned(TASVIR_CACHELINE_BYTES))) tasvir_area_head
     tasvir_area_log diff_log[TASVIR_NR_AREA_LOGS];
     struct {
         tasvir_node *node;
-        uint64_t version;
+        uint64_t *version;
     } users[TASVIR_NR_NODES];
 } tasvir_area_header;
 
@@ -168,12 +173,18 @@ typedef struct __attribute__((aligned(TASVIR_CACHELINE_BYTES))) tasvir_area_head
  *
  */
 typedef struct tasvir_stats {
-    uint64_t success;
-    uint64_t failure;
-    uint64_t sync_barrier_us;
-    uint64_t sync_us; /* inclusive of barrier time */
-    uint64_t sync_changed_bytes;
-    uint64_t sync_processed_bytes;
+    uint64_t isync_success;
+    uint64_t isync_failure;
+    uint64_t isync_barrier_us;
+    uint64_t isync_us; /* inclusive of isync_barrier_us */
+    uint64_t isync_changed_bytes;
+    uint64_t isync_processed_bytes;
+
+    uint64_t esync_cnt;
+    uint64_t esync_us;
+    uint64_t esync_changed_bytes;
+    uint64_t esync_processed_bytes;
+
     uint64_t rx_bytes;
     uint64_t tx_bytes;
     uint64_t rx_pkts;

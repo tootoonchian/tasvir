@@ -91,7 +91,7 @@ public:
         _loss->ReduceAdd();
         _loss->Barrier();
 
-        return _loss->DataMaster()[0] / nr_datapoints;
+        return _loss->DataParent()[0] / nr_datapoints;
     }
 
     void PrecomputeCoefficients(const Datapoint &datapoint, Gradient &g, Model &local_model) override {

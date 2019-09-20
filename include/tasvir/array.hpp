@@ -33,23 +33,22 @@ class Array {
 
     void Barrier() {
         std::size_t wid;
-        _done = _version;
-        tasvir_log(&_done, sizeof(_done));
-        tasvir_service_wait(5 * 1000 * 1000, true);
+        _version_done = _version;
+        tasvir_log(&_version_done, sizeof(_version_done));
+        tasvir_service_wait(5 * S2US, true);
 
         if (_wid == 0) {
             for (wid = 0; wid < _nr_workers; wid++)
-                while (_workers[wid]->_done != _parent->_version) {
-                    tasvir_service();
-                }
-            _parent->_done = _parent->_version;
+                while (_workers[wid]->_version_done != _parent->_version)
+                    tasvir_service_wait(S2US, false);
+            _parent->_version_done = _parent->_version;
             _parent->_version++;
-            tasvir_log(&_parent->_done, sizeof(_done));
+            tasvir_log(&_parent->_version_done, sizeof(_version_done));
             tasvir_log(&_parent->_version, sizeof(_version));
         }
 
         /* block until parent changes version */
-        while (_done == _parent->_version)
+        while (_version_done == _parent->_version)
             tasvir_service();
 
         _version = _parent->_version;
@@ -81,12 +80,14 @@ class Array {
     }
 
    private:
+    static constexpr uint64_t MS2US = 1000;
+    static constexpr uint64_t S2US = 1000 * MS2US;
     size_type _size; /* the number of elements in the array */
 
     std::size_t _nr_workers; /* number of workers under this */
     uint64_t _wid;           /* worker identifier */
     uint64_t _version;       /* version we are processing now */
-    uint64_t _done;          /* version we finished processing last */
+    uint64_t _version_done;  /* version we finished processing last */
     uint64_t _initialized;   /* sentinel to ensure initialization */
 
     alignas(64) Array<T>* _parent;   /* pointer to the parent */
@@ -103,25 +104,17 @@ Array<T>* Array<T>::Allocate(const char* parent_name, uint64_t wid, std::size_t 
     Array<T>* parent;
     Array<T>* worker;
 
-    tasvir_area_desc* root_desc = tasvir_attach(NULL, "root", false);
-    if (!root_desc) {
-        std::cerr << "tasvir_attach to root failed" << std::endl;
-        abort();
-    }
     tasvir_area_desc* d;
     tasvir_str name;
 
     tasvir_area_desc param = {};
-    param.pd = root_desc;
     param.len = sizeof(T) * nr_elements + sizeof(Array<T>);
-    param.sync_int_us = 50000;
-    param.sync_ext_us = 500000;
+    param.sync_int_us = 50 * MS2US;
+    param.sync_ext_us = 500 * MS2US;
     snprintf(param.name, sizeof(param.name), "%s-%d", parent_name, wid);
     d = tasvir_new(param);
-    if (!d) {
-        std::cerr << "tasvir_new failed" << std::endl;
-        abort();
-    }
+    if (!d)
+        return NULL;
 
     worker = reinterpret_cast<Array<T>*>(tasvir_data(d));
     tasvir_log(worker, sizeof(*worker));
@@ -129,39 +122,33 @@ Array<T>* Array<T>::Allocate(const char* parent_name, uint64_t wid, std::size_t 
     worker->_nr_workers = 0;
     worker->_wid = wid;
     worker->_version = 1;
-    worker->_done = 0;
-    worker->_initialized = 0xdeadbeef;
+    worker->_version_done = 0;
 
     if (wid == 0) {
-        worker->_initialized = 0;
-
+        parent = reinterpret_cast<Array<T>*>(tasvir_data(d));
         for (std::size_t i = 0; i < nr_workers; i++) {
             snprintf(name, sizeof(name), "%s-%d", name, i);
-            d = tasvir_attach_wait(root_desc, name, i == wid, 5 * 1000 * 1000);
-            if (!d) {
-                std::cerr << "tasvir_attach " << name << " failed" << std::endl;
-                abort();
-            }
+            d = tasvir_attach_wait(5 * S2US, name);
+            if (!d)
+                return NULL;
             parent->_workers[i] = reinterpret_cast<Array<T>*>(tasvir_data(d));
             while (!parent->_workers[i] || parent->_workers[i]->_initialized != 0xdeadbeef)
-                tasvir_service();
+                tasvir_service_wait(S2US, false);
         }
         parent->_initialized = 0xdeadbeef;
         tasvir_log(parent, sizeof(*parent));
-        tasvir_service_wait(5 * 1000 * 1000, true);
+        tasvir_service_wait(5 * S2US, true);
     } else {
         worker->_initialized = 0xdeadbeef;
-
-        tasvir_service_wait(5 * 1000 * 1000, true);
+        tasvir_service_wait(5 * S2US, true);
         snprintf(name, sizeof(name), "%s-0", name);
-        d = tasvir_attach_wait(root_desc, name, true, 5 * 1000 * 1000);
-        if (!d) {
-            std::cerr << "tasvir_attach " << name << " failed" << std::endl;
-            abort();
-        }
+        // TODO: add option to attach to RW copy
+        d = tasvir_attach_wait(5 * S2US, name);
+        if (!d)
+            return NULL;
         parent = reinterpret_cast<Array<T>*>(tasvir_data(d));
         while (parent->_initialized != 0xdeadbeef)
-            tasvir_service();
+            tasvir_service_wait(S2US, false);
     }
 
     tasvir_log(worker, sizeof(*worker));

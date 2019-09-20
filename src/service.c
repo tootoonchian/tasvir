@@ -1,145 +1,25 @@
+#include <rte_ethdev.h>
 #include <stdarg.h>
+
 #include "tasvir.h"
-
-static void tasvir_service_msg_rpc_request(tasvir_msg_rpc *m) {
-    /* FIXME: badly insecure */
-    tasvir_fn_desc *fnd = &ttld.fn_descs[m->fid];
-    assert(fnd);
-
-    /* execute the function */
-    fnd->fnptr_rpc(m->data, fnd->arg_offsets);
-
-    if (fnd->flags & TASVIR_FN_NOACK) {
-        rte_mempool_put(ttld.ndata->mp, (void *)m);
-        return;
-    }
-
-    /* convert the message into a response */
-    m->h.dst_tid = m->h.src_tid;
-    m->h.src_tid = ttld.thread ? ttld.thread->tid : ttld.ndata->nodecast_tid;
-    m->h.type = TASVIR_MSG_TYPE_RPC_RESPONSE;
-    if (m->d->h && m->h.version == m->d->h->version) {
-        LOG_ERR("rpc src and dst at the same version (area=%s v=%lu)", m->d->name, m->h.version);
-        abort();
-    }
-    /* receiver compares msg version with the area version to ensure updates are seen */
-    m->h.version = m->d->h ? m->d->h->version : 0;
-    if (tasvir_service_msg((tasvir_msg *)m, TASVIR_MSG_SRC_ME) != 0) {
-        LOG_DBG("failed to send a response");
-    }
-}
-
-static void tasvir_service_msg_rpc_response(tasvir_msg_rpc *m) {
-    tasvir_rpc_status *rs = &ttld.status_l[m->h.id];
-    rs->status = TASVIR_RPC_STATUS_DONE;
-    if (rs->do_free)
-        rte_mempool_put(ttld.ndata->mp, (void *)m);
-    else
-        rs->response = m;
-}
-
-#ifdef TASVIR_DAEMON
-static inline void tasvir_service_msg_mem(tasvir_msg_mem *m) {
-    /* TODO: log_write and sync */
-    if (m->addr) {
-        tasvir_log(m->addr, m->len);
-        tasvir_stream_vec_rep(tasvir_data2shadow(m->addr), m->line, m->len);
-
-        /* write to both versions during boot of a non-root daemon because no sync happens */
-        if (unlikely(!ttld.thread ||
-                     ttld.ndata->tdata[TASVIR_THREAD_DAEMON_IDX].state == TASVIR_THREAD_STATE_BOOTING)) {
-            tasvir_stream_vec_rep(m->addr, m->line, m->len);
-        }
-    }
-
-    if (m->d && tasvir_area_is_active(m->d)) {
-        // FIXME: assumes no reordering
-        tasvir_area_header *h = tasvir_data2shadow(m->d->h);
-        if (m->last) {
-            h->flags_ &= ~TASVIR_AREA_CACHE_NETUPDATE;
-        } else {
-            h->flags_ |= TASVIR_AREA_CACHE_NETUPDATE;
-        }
-    }
-
-    rte_mempool_put(ttld.ndata->mp, (void *)m);
-}
-#endif
-
-/* FIXME: not robust */
-int tasvir_service_msg(tasvir_msg *m, tasvir_msg_src src) {
-    if (!m) {
-        abort();
-    }
-    bool is_src_me = src == TASVIR_MSG_SRC_ME;
-    bool is_dst_local =
-        src == TASVIR_MSG_SRC_NET2US || memcmp(&m->dst_tid.nid, &ttld.ndata->nodecast_tid.nid, sizeof(tasvir_nid)) == 0;
-    bool is_dst_me = src == TASVIR_MSG_SRC_NET2ROOT ||
-                     (!is_src_me && is_dst_local && (!ttld.thread || m->dst_tid.idx == ttld.thread->tid.idx));
-
-#ifdef TASVIR_DEBUG
-    char msg_str[256];
-    tasvir_msg2str(m, is_src_me, is_dst_me, msg_str, sizeof(msg_str));
-    LOG_DBG("%s", msg_str);
-#endif
-    if (!is_dst_me) { /* no-op when message is ours */
-        struct rte_ring *r;
-#ifdef TASVIR_DAEMON
-        if (is_dst_local) {
-            r = ttld.ndata->tdata[m->dst_tid.idx == (uint16_t)-1 ? 0 : m->dst_tid.idx].ring_rx;
-        } else {
-            tasvir_populate_msg_nethdr(m);
-            r = ttld.ndata->ring_ext_tx;
-        }
-#else
-        r = ttld.ndata->tdata[ttld.thread ? ttld.thread->tid.idx : TASVIR_THREAD_DAEMON_IDX].ring_tx;
-#endif
-
-        if (r && rte_ring_sp_enqueue(r, m) != 0) {
-            LOG_DBG("rte_ring_sp_enqueue to ring %p failed", (void *)r);
-            rte_mempool_put(ttld.ndata->mp, (void *)m);
-            return -1;
-        }
-        return 0;
-    }
-    /* end message routing */
-
-    if (m->type == TASVIR_MSG_TYPE_RPC_REQUEST) {
-        tasvir_service_msg_rpc_request((tasvir_msg_rpc *)m);
-    } else if (m->type == TASVIR_MSG_TYPE_RPC_RESPONSE) {
-        tasvir_service_msg_rpc_response((tasvir_msg_rpc *)m);
-    } else {
-        LOG_DBG("received an unrecognized message type %d", m->type);
-        rte_mempool_put(ttld.ndata->mp, (void *)m);
-        abort();
-        return -1;
-    }
-    return 0;
-}
 
 #ifdef TASVIR_DAEMON
 void tasvir_service_port_tx() {
     tasvir_msg *m[TASVIR_PKT_BURST];
     unsigned int count, i, retval;
     bool tx_fail = false;
+    struct rte_ring *__restrict r = ttld.ndata->ring_ext_tx;
 
-    while (!rte_ring_empty(ttld.ndata->ring_ext_tx) && !tx_fail) {
+    while (!rte_ring_empty(r) && !tx_fail) {
         /* every message on ring_ext_tx must have already populated nethdr */
-        count = rte_ring_sc_dequeue_burst(ttld.ndata->ring_ext_tx, (void **)m, TASVIR_PKT_BURST, NULL);
-
+        count = rte_ring_sc_dequeue_burst(r, (void **)m, TASVIR_PKT_BURST, NULL);
         i = 0;
         do {
             retval = rte_eth_tx_burst(ttld.ndata->port_id, 0, (struct rte_mbuf **)&m[i], count - i);
+            if (!retval)
+                _mm_pause();
             i += retval;
-        } while (retval > 0 && i < count);
-
-        if (i < count) {
-            tx_fail = true;
-            /* FIXME: reorders */
-            if (rte_ring_sp_enqueue_bulk(ttld.ndata->ring_ext_tx, (void **)&m[i], count - i, NULL) == 0)
-                abort();
-            break;
-        }
+        } while (i < count);
     }
 }
 
@@ -149,21 +29,22 @@ static inline void tasvir_service_port_rx() {
 
     while ((retval = rte_eth_rx_burst(ttld.ndata->port_id, 0, (struct rte_mbuf **)m, TASVIR_PKT_BURST)) > 0) {
         for (i = 0; i < retval; i++) {
+            bool valid = false;
+            /* filter out and pass on Tasvir-typed messages */
             if (m[i]->eh.ether_type == rte_cpu_to_be_16(TASVIR_ETH_PROTO)) {
                 ttld.ndata->stats_cur.rx_bytes += m[i]->mbuf.pkt_len;
                 ttld.ndata->stats_cur.rx_pkts++;
 
-                if (is_same_ether_addr(&m[i]->eh.d_addr, &ttld.ndata->mac_addr)) {
-                    tasvir_service_msg(m[i], TASVIR_MSG_SRC_NET2US);
-                } else if (is_same_ether_addr(&m[i]->eh.d_addr, &ttld.ndata->update_tid.nid.mac_addr)) {
-                    tasvir_service_msg_mem((tasvir_msg_mem *)m[i]);
-                } else if (ttld.is_root &&
-                           is_same_ether_addr(&m[i]->eh.d_addr, &ttld.ndata->rootcast_tid.nid.mac_addr)) {
-                    tasvir_service_msg(m[i], TASVIR_MSG_SRC_NET2ROOT);
-                } else {
-                    rte_mempool_put(ttld.ndata->mp, (void *)m[i]);
+                if (!memcmp(&m[i]->eh.ether_dhost, &ttld.ndata->memcast_tid.nid.mac_addr, ETH_ALEN)) {
+                    valid = true;
+                    tasvir_handle_msg_mem((tasvir_msg_mem *)m[i]);
+                } else if (!memcmp(&m[i]->eh.ether_dhost, &ttld.ndata->mac_addr, ETH_ALEN) ||
+                           !memcmp(&m[i]->eh.ether_dhost, &ttld.ndata->rpccast_tid.nid.mac_addr, ETH_ALEN)) {
+                    valid = true;
+                    tasvir_handle_msg_rpc(m[i], TASVIR_MSG_SRC_NET);
                 }
-            } else {
+            }
+            if (!valid) {
                 rte_mempool_put(ttld.ndata->mp, (void *)m[i]);
             }
         }
@@ -171,33 +52,56 @@ static inline void tasvir_service_port_rx() {
 }
 #endif
 
-static inline void tasvir_service_ring(struct rte_ring *ring) {
-    tasvir_msg *m[TASVIR_RING_SIZE];
+static inline void tasvir_service_ring(struct rte_ring *ring, bool rpc) {
+    tasvir_msg *m[TASVIR_PKT_BURST];
     unsigned count;
 
-    while (unlikely((count = rte_ring_sc_dequeue_burst(ring, (void **)m, TASVIR_RING_SIZE, NULL)) > 0)) {
+    while ((count = rte_ring_sc_dequeue_burst(ring, (void **)m, TASVIR_PKT_BURST, NULL)) > 0) {
         for (unsigned i = 0; i < count; i++)
-            tasvir_service_msg(m[i], TASVIR_MSG_SRC_LOCAL);
+            if (rpc)
+                tasvir_handle_msg_rpc(m[i], TASVIR_MSG_SRC_LOCAL);
+#ifdef TASVIR_DAEMON
+            else
+                tasvir_handle_msg_mem((tasvir_msg_mem *)m[i]);
+#endif
     }
 }
 
+
 static void tasvir_service_io() {
 #ifdef TASVIR_DAEMON
-    /* rings */
+    /* local rings */
     if (ttld.node) {
         for (size_t tid = 0; tid < TASVIR_NR_THREADS_LOCAL; tid++)
             if (ttld.ndata->tdata[tid].state == TASVIR_THREAD_STATE_RUNNING ||
-                ttld.ndata->tdata[tid].state == TASVIR_THREAD_STATE_BOOTING) {
-                tasvir_service_ring(ttld.ndata->tdata[tid].ring_tx);
-            }
+                ttld.ndata->tdata[tid].state == TASVIR_THREAD_STATE_BOOTING)
+                tasvir_service_ring(ttld.ndata->tdata[tid].ring_tx, true);
     }
 
+#ifndef TASVIR_SYNC_EXT_SKIP
     /* physical port */
-    tasvir_service_port_rx();
-    tasvir_service_port_tx();
-#else
-    tasvir_service_ring(ttld.tdata->ring_rx);
+    if (!ttld.is_root || tasvir_is_running()) {  // no I/O during root's boot
+        tasvir_service_port_rx();
+        tasvir_service_port_tx();
+    }
 #endif
+#else
+    tasvir_service_ring(ttld.tdata->ring_rx, true);
+#endif
+}
+
+void tasvir_service_nodes() {
+    static uint64_t v_prev = 0;
+    if (ttld.root_desc->h->version == v_prev)
+        return;
+
+    v_prev = ttld.root_desc->h->version;
+    /* attach to new node areas */
+    tasvir_area_desc *c = tasvir_data(ttld.root_desc);
+    size_t nr_areas = ttld.root_desc->h->nr_areas;
+    for (size_t i = 0; --nr_areas > 0 && i < ttld.root_desc->nr_areas_max; i++)
+        if (c[i].type == TASVIR_AREA_TYPE_NODE)
+            tasvir_attach_wait(100 * MS2US, c[i].name);
 }
 
 int tasvir_service() {
@@ -208,54 +112,51 @@ int tasvir_service() {
     tasvir_service_io();
 
 #ifdef TASVIR_DAEMON
-    /* conditionally update time to reduce coherency traffic (TODO: granularity) */
-    if (ttld.ndata->time_us != ttld.tdata->time_us) {
+    if (ttld.ndata->time_us != ttld.tdata->time_us) /* conditional update to reduce coherency traffic */
         ttld.ndata->time_us = ttld.tdata->time_us;
-    }
-
-    if (ttld.tdata->state != TASVIR_THREAD_STATE_RUNNING) {
-        return -1;
-    }
-
-    if (ttld.ndata->stat_reset_req) {
-        memset(&ttld.ndata->stats, 0, sizeof(tasvir_stats));
-        memset(&ttld.ndata->stats_cur, 0, sizeof(tasvir_stats));
-        ttld.ndata->last_stat = ttld.ndata->time_us;
-        ttld.ndata->last_sync_int_start = ttld.ndata->time_us;
-        ttld.ndata->last_sync_ext_start = ttld.ndata->time_us;
-        ttld.ndata->last_sync_int_end = ttld.ndata->time_us;
-        ttld.ndata->last_sync_ext_end = ttld.ndata->time_us;
-        ttld.ndata->stat_reset_req = 0;
-    }
-
-    if (ttld.ndata->time_us - ttld.ndata->last_sync_ext_end >= ttld.ndata->sync_ext_us) {
-        tasvir_sync_external();
-    }
-
-    if ((ttld.ndata->sync_req || ttld.ndata->time_us - ttld.ndata->last_sync_int_end >= ttld.ndata->sync_int_us)) {
-        tasvir_sched_sync_internal();
-    }
-
-    if (ttld.ndata->stat_update_req || (ttld.ndata->time_us - ttld.ndata->last_stat >= TASVIR_STAT_US)) {
-        tasvir_stats_update();
-        ttld.ndata->stat_update_req = 0;
-    }
 #endif
 
-    if (ttld.thread && ttld.tdata->state == TASVIR_THREAD_STATE_RUNNING && ttld.tdata->next_sync_seq != ttld.tdata->prev_sync_seq) {
-        return tasvir_sync_internal();
+    if (!tasvir_is_running())
+        return -1;
+
+#ifdef TASVIR_DAEMON
+    if (ttld.ndata->stat_reset_req)
+        tasvir_stats_reset();
+
+    tasvir_service_nodes();
+
+    if (ttld.ndata->sync_req || ttld.ndata->time_us - ttld.ndata->last_sync_int_end >= ttld.ndata->sync_int_us)
+        tasvir_sched_sync_internal();
+#endif
+
+    if (ttld.tdata->next_sync_seq != ttld.tdata->prev_sync_seq) {
+        int retval = tasvir_sync_internal();
+#ifdef TASVIR_DAEMON
+        if (!retval) /* process pending memory updates */
+            tasvir_service_ring(ttld.ndata->ring_mem_pending, false);
+#endif
+        return retval;
     }
+
+#ifdef TASVIR_DAEMON
+#ifndef TASVIR_SYNC_EXT_SKIP
+    if (ttld.ndata->time_us - ttld.ndata->last_sync_ext_end >= ttld.ndata->sync_ext_us)
+        tasvir_sync_external();
+#endif
+
+    if (ttld.ndata->stat_update_req || (ttld.ndata->time_us - ttld.ndata->last_stat >= TASVIR_STAT_US))
+        tasvir_stats_update();
+#endif
 
     return -1;
 }
 
-int tasvir_service_wait(uint64_t timeout_us, bool force) {
-    int rc = -1;
+int tasvir_service_wait(uint64_t timeout_us, bool sync_req) {
+    int retval = -1;
+    if (sync_req)
+        ttld.ndata->sync_req = true;
     uint64_t end_tsc = __rdtsc() + tasvir_usec2tsc(timeout_us);
-    while (__rdtsc() < end_tsc && (rc = tasvir_service()) != 0) {
+    while (__rdtsc() < end_tsc && (retval = tasvir_service()))
         _mm_pause();
-        if (force)
-            ttld.ndata->sync_req = true;
-    }
-    return rc;
+    return retval;
 }

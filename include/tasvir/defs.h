@@ -29,30 +29,29 @@
 #define TASVIR_HEARTBEAT_US (1 * 1000 * 1000) /**< Time (microseconds) after which a node may be announced dead */
 
 #define TASVIR_ETH_PROTO (0x88b6)                     /**< Ethernet protocol number to distinguish Tasvir traffic */
-#define TASVIR_HUGEPAGE_SIZE (size_t)(2 << 20)        /**< Size of the huge pages to use */
 #define TASVIR_MBUF_POOL_SIZE (size_t)((2 << 17) - 1) /**< Size of the DPDK packet mbuf pool */
 #define TASVIR_MBUF_CORE_CACHE_SIZE (size_t)(512)     /**< Size of the per-lcore mbuf cache size */
 #define TASVIR_PKT_BURST (32)                         /**< Packet burst size to use for I/O */
-#define TASVIR_RING_SIZE (256)                        /**< Maximum size (bytes) of ring for internal I/O */
-#define TASVIR_RING_EXT_SIZE (2048)                   /**< Maximum size (bytes) of ring for external I/O */
+#define TASVIR_RING_SIZE (256)                        /**< Maximum size of ring for internal I/O (bytes) */
+#define TASVIR_RING_EXT_SIZE (4096)                   /**< Maximum size of ring for external I/O (bytes) */
 
-#define TASVIR_NR_AREAS_MAX (1024)        /**< Maximum number of areas */
-#define TASVIR_NR_AREA_LOGS (4)           /**< Number of logs (time intervals) to maintain per area */
+#define TASVIR_NR_AREAS (1024)            /**< Maximum number of areas */
+#define TASVIR_NR_AREA_LOGS (4)           /**< Number of internal logs (time intervals) kept per area */
 #define TASVIR_NR_CACHELINES_PER_MSG (21) /**< Number of cachelines that fit in a single Tasvir message */
 #define TASVIR_NR_FN (4096)               /**< Maximum number of RPC functions */
 #define TASVIR_NR_RPC_ARGS (8)            /**< Maximum number of RPC function arguments */
-#define TASVIR_NR_RPC_MSG (64 * 1024)     /**< Maximum number of outstanding RPC messages */
+#define TASVIR_NR_RPC_MSG (256 * 1024)    /**< Maximum number of outstanding RPC messages */
 #define TASVIR_NR_NODES (64)              /**< Maximum number of nodes in Tasvir */
 #define TASVIR_NR_SOCKETS (2)             /**< Maximum number of CPU sockets per node */
 #define TASVIR_NR_SYNC_JOBS (2048)        /**< Maximum number of internal sync jobs */
 #define TASVIR_NR_THREADS_LOCAL (64)      /**< Maximum number of local threads */
-#define TASVIR_STRLEN_MAX (32)            /**< Maximum size (bytes) of strings */
+#define TASVIR_STRLEN_MAX (32)            /**< Maximum size of strings (bytes) */
 #define TASVIR_THREAD_DAEMON_IDX (0)      /**< Local thread index for the daemon thread */
 
 #define __TASVIR_LOG2(x) (31 - __builtin_clz(x | 1)) /**< Compile-time log2 for numbers that are power of two */
 
-#define TASVIR_CACHELINE_BYTES (64)                                    /**< Cache line size in bytes */
-#define TASVIR_LOG_GRANULARITY_BYTES (64)                              /**< Granularity of each log bit in bytes */
+#define TASVIR_CACHELINE_BYTES (64)                                    /**< Cache line size (bytes) */
+#define TASVIR_LOG_GRANULARITY_BYTES (64)                              /**< Granularity of each log bit (bytes) */
 #define TASVIR_LOG_UNIT_BITS (64)                                      /**< Number of bits in each log unit */
 #define TASVIR_SHIFT_BIT (__TASVIR_LOG2(TASVIR_LOG_GRANULARITY_BYTES)) /**<  */
 #define TASVIR_SHIFT_BYTE (TASVIR_SHIFT_BIT + __TASVIR_LOG2(CHAR_BIT)) /**<  */
@@ -60,40 +59,29 @@
 
 #define TASVIR_ALIGNMENT (uintptr_t)(8 * (1 << TASVIR_SHIFT_UNIT)) /**< The default area alignment unit for Tasvir */
 #define TASVIR_ALIGNX(x, a) (((uintptr_t)(x) + a - 1) & ~(a - 1))  /**< Align address/size x per alignment a */
-#define TASVIR_ALIGN(x) TASVIR_ALIGNX(x, TASVIR_ALIGNMENT)         /**< Align address/size x per TASVIR_ALIGNMENT */
+#define TASVIR_ALIGN(x) TASVIR_ALIGNX((x), TASVIR_ALIGNMENT)       /**< Align address/size x per TASVIR_ALIGNMENT */
 
-#define TASVIR_SIZE_DATA \
-    ((size_t)TASVIR_ALIGN((4UL << 40))) /**< Size (bytes) of the Tasvir data region (must be a power of two) */
-#define TASVIR_SIZE_LOG \
-    ((size_t)TASVIR_ALIGN((TASVIR_SIZE_DATA >> TASVIR_SHIFT_BYTE))) /**< Size (bytes) of the log region */
-#define TASVIR_SIZE_LOCAL \
-    ((size_t)TASVIR_ALIGN((TASVIR_HUGEPAGE_SIZE * 260))) /**< Size (bytes) of the local control region */
+#define TASVIR_SIZE_DATA ((size_t)TASVIR_ALIGN(1UL << 40))                            /**< Data region size (bytes) */
+#define TASVIR_SIZE_LOG ((size_t)TASVIR_ALIGN(TASVIR_SIZE_DATA >> TASVIR_SHIFT_BYTE)) /**< Log region size (bytes) */
+#define TASVIR_SIZE_LOCAL ((size_t)TASVIR_ALIGN(1UL << 30))                           /**< Local region size (bytes) */
 
-#define TASVIR_ADDR_BASE ((uintptr_t)(0x0000100000000000UL)) /**< The base virtual address */
-#define TASVIR_ADDR_DATA ((uintptr_t)(TASVIR_ADDR_BASE))     /**< The base virtual address for the data region */
-#define TASVIR_ADDR_SHADOW \
-    ((uintptr_t)(TASVIR_ADDR_DATA + TASVIR_SIZE_DATA)) /**< The base virtual address for the shadow region */
-#define TASVIR_ADDR_LOG \
-    ((uintptr_t)(TASVIR_ADDR_SHADOW + TASVIR_SIZE_DATA)) /**< The base virtual address for the log region */
-#define TASVIR_ADDR_LOCAL \
-    ((uintptr_t)(TASVIR_ADDR_LOG + TASVIR_SIZE_LOG)) /**< The base virtual address for the local control region */
-#define TASVIR_ADDR_END ((uintptr_t)(TASVIR_ADDR_LOCAL + TASVIR_SIZE_LOCAL)) /**< The end virtual address */
-#define TASVIR_ADDR_ROOT_DESC \
-    ((uintptr_t)(TASVIR_ADDR_SHADOW - TASVIR_HUGEPAGE_SIZE)) /**< The base virtual address for the root descriptor */
+#define TASVIR_ALIGN_DATA(x) TASVIR_ALIGNX(x, TASVIR_SIZE_DATA) /**< Align address/size x per data region size */
 
-#define TASVIR_SIZE_WHOLE TASVIR_ADDR_END - TASVIR_ADDR_BASE
+#define TASVIR_ADDR_BASE ((uintptr_t)TASVIR_ALIGN_DATA(TASVIR_SIZE_DATA))      /**< Tasvir base virtual address */
+#define TASVIR_ADDR_DATA ((uintptr_t)(TASVIR_ADDR_BASE))                       /**< Data region base virtual address */
+#define TASVIR_ADDR_LOG ((uintptr_t)(TASVIR_ADDR_DATA + 2 * TASVIR_SIZE_DATA)) /**< Log region base virtual address */
+#define TASVIR_ADDR_LOCAL ((uintptr_t)(TASVIR_ADDR_LOG + TASVIR_SIZE_LOG))     /**< Local region base virtual address */
+#define TASVIR_ADDR_END ((uintptr_t)(TASVIR_ADDR_LOCAL + TASVIR_SIZE_LOCAL))
+#define TASVIR_ADDR_DATA_RO ((uintptr_t)TASVIR_ALIGN_DATA(TASVIR_ADDR_END))
+#define TASVIR_ADDR_DATA_RW ((uintptr_t)(TASVIR_ADDR_DATA_RO + TASVIR_SIZE_DATA))
+#define TASVIR_ADDR_DPDK \
+    ((uintptr_t)(TASVIR_ADDR_DATA_RW + TASVIR_SIZE_DATA + 4 * (1UL << 30))) /**< DPDK base virtual address */
 
-#define TASVIR_ADDR_BASE2 TASVIR_ADDR_END
-#define TASVIR_ADDR_DATA2 (TASVIR_ADDR_BASE2 + TASVIR_ADDR_DATA - TASVIR_ADDR_BASE)
-#define TASVIR_ADDR_SHADOW2 (TASVIR_ADDR_BASE2 + TASVIR_ADDR_SHADOW - TASVIR_ADDR_BASE)
-#define TASVIR_ADDR_END2 (TASVIR_ADDR_BASE2 + TASVIR_SIZE_WHOLE)
+#define TASVIR_SIZE_MAP (TASVIR_ADDR_END - TASVIR_ADDR_BASE)
 
-#define TASVIR_ADDR_DPDK_BASE \
-    ((uintptr_t)(TASVIR_ADDR_END2 + TASVIR_HUGEPAGE_SIZE)) /**< The end virtual address for DPDK */
-
-#define TASVIR_OFFSET_RO (TASVIR_ADDR_DATA2 - TASVIR_ADDR_DATA)
-#define TASVIR_OFFSET_RW (TASVIR_ADDR_SHADOW2 - TASVIR_ADDR_DATA)
-#define TASVIR_OFFSET_SHADOW (TASVIR_ADDR_SHADOW - TASVIR_ADDR_DATA)
+#define TASVIR_OFFSET_RO (TASVIR_ADDR_DATA_RO - TASVIR_ADDR_DATA)
+#define TASVIR_OFFSET_RW (TASVIR_ADDR_DATA_RW - TASVIR_ADDR_DATA)
+#define TASVIR_OFFSET_RO2RW (TASVIR_ADDR_DATA_RW - TASVIR_ADDR_DATA_RO)
 #define TASVIR_OFFSET_LOG (TASVIR_ADDR_LOG - TASVIR_ADDR_DATA)
 
 /* source: http://ptspts.blogspot.com/2013/11/how-to-apply-macro-to-all-arguments-of.html */

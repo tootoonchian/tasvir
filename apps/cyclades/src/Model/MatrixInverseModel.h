@@ -187,7 +187,7 @@ public:
         _loss->ReduceAdd();
         _loss->Barrier();
 
-        return _loss->DataMaster()[0] / nr_datapoints;
+        return _loss->DataParent()[0] / nr_datapoints;
         */
 
         double loss = 0, sum_sqr = 0, second = 0;

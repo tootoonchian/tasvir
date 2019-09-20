@@ -86,7 +86,7 @@ public:
         _loss->ReduceAdd();
         _loss->Barrier();
 
-        return _loss->DataMaster()[0] / nr_datapoints;
+        return _loss->DataParent()[0] / nr_datapoints;
     }
 
     void PrecomputeCoefficients(const Datapoint &datapoint, Gradient &g, Model &local_model) override {
@@ -113,7 +113,7 @@ public:
     const double &C() { return _C; }
 
     inline double &CSumMulti(int offset, bool global) {
-        return global ? _c_sum_mult->DataMaster()[offset] : _c_sum_mult->DataWorker()[offset];
+        return global ? _c_sum_mult->DataParent()[offset] : _c_sum_mult->DataWorker()[offset];
     }
 
     virtual void EpochFinish() override {

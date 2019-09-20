@@ -1,13 +1,3 @@
-/**
- * @file
- *   tasvir.h
- * @brief
- *   Function prototypes for Tasvir.
- *
- * @author
- *   Amin Tootoonchian
- */
-
 #ifndef TASVIR_SRC_TASVIR_H_
 #define TASVIR_SRC_TASVIR_H_
 #pragma once
@@ -16,9 +6,8 @@
 #include <errno.h>
 #include <immintrin.h>
 #include <inttypes.h>
+#include <net/ethernet.h>
 #include <rte_cycles.h>
-#include <rte_ethdev.h>
-#include <rte_ip.h>
 #include <rte_mbuf.h>
 #include <rte_ring.h>
 #include <signal.h>
@@ -31,11 +20,12 @@
 
 #include <tasvir/tasvir.h>
 
-#define TASVIR_CHANGES_PER_SYNC 64 * 1024
+#define TASVIR_SYNC_LIST_LEN 512
 
 typedef enum {
     TASVIR_THREAD_STATE_INVALID = 0,
     TASVIR_THREAD_STATE_DEAD,
+    TASVIR_THREAD_STATE_PREBOOT,
     TASVIR_THREAD_STATE_BOOTING,
     TASVIR_THREAD_STATE_RUNNING,
     TASVIR_THREAD_STATE_SLEEPING
@@ -50,7 +40,6 @@ typedef struct tasvir_nid {
 typedef struct tasvir_tid {
     tasvir_nid nid; /* node id */
     uint16_t idx;   /* local index */
-    uint16_t core;  /* local core */
     pid_t pid;      /* pid */
 } tasvir_tid;
 
@@ -64,62 +53,75 @@ struct tasvir_node { /* node context */
     tasvir_nid nid;
     uint32_t heartbeat_us;
     tasvir_thread threads[TASVIR_NR_THREADS_LOCAL];
+    size_t nr_areas;
+    tasvir_area_desc *areas_d[TASVIR_NR_AREAS];
+    uint64_t areas_v[TASVIR_NR_AREAS];
 };
 
 typedef enum {
-    TASVIR_AREA_CACHE_ACTIVE = 1 << 0,    /* set once area is bootstrapped */
-    TASVIR_AREA_CACHE_MAPPED_RW = 1 << 1, /* distinguish reader and writer copies */
-    TASVIR_AREA_CACHE_LOCAL = 1 << 2,     /* area owner is local */
-    TASVIR_AREA_CACHE_NETUPDATE = 1 << 3, /* network updates are being applied */
-    TASVIR_AREA_CACHE_SLEEPING = 1 << 4,  /* not syncing temporarily */
+    TASVIR_AREA_FLAG_ACTIVE = 1 << 0,      /* set once area is bootstrapped */
+    TASVIR_AREA_FLAG_MAPPED_RW = 1 << 1,   /* distinguish reader and writer copies */
+    TASVIR_AREA_FLAG_LOCAL = 1 << 2,       /* area owner is local */
+    TASVIR_AREA_FLAG_SLEEPING = 1 << 3,    /* not syncing temporarily */
+    TASVIR_AREA_FLAG_EXT_PENDING = 1 << 4, /* incoming external sync ongoing */
+    TASVIR_AREA_FLAG_EXT_IGNORE = 1 << 5,  /* incoming external sync to be ignored */
+    TASVIR_AREA_FLAG_EXT_ENQUEUE = 1 << 6, /* incoming external sync to be queued */
 } tasvir_area_cache_flag;
 
 typedef enum {
     TASVIR_MSG_TYPE_INVALID = 0,
     TASVIR_MSG_TYPE_MEM,
-    TASVIR_MSG_TYPE_RPC_ONEWAY,
     TASVIR_MSG_TYPE_RPC_REQUEST,
     TASVIR_MSG_TYPE_RPC_RESPONSE
 } tasvir_msg_type;
 
-typedef struct __attribute__((__packed__)) tasvir_msg {
+typedef struct tasvir_msg tasvir_msg;
+typedef struct tasvir_msg_rpc tasvir_msg_rpc;
+typedef struct tasvir_msg_mem tasvir_msg_mem;
+
+struct __attribute__((__packed__)) tasvir_msg {
     struct {
         struct rte_mbuf mbuf;
         uint8_t pad_[RTE_PKTMBUF_HEADROOM];
     };
-    struct ether_hdr eh;
+    struct ether_header eh;
     struct ip iph;
-    tasvir_tid src_tid;
-    tasvir_tid dst_tid;
+
     tasvir_msg_type type;
     uint16_t id;
+
+    tasvir_tid src_tid;
+    tasvir_tid dst_tid;
+
+    const tasvir_area_desc *d;
     uint64_t version; /* version at source */
-} tasvir_msg;
+};
 
-/**
- *
- */
-typedef struct __attribute__((__packed__)) tasvir_msg_rpc {
+struct __attribute__((__packed__)) tasvir_msg_rpc {
     tasvir_msg h;
-    tasvir_area_desc *d;
     uint32_t fid;
-    uint8_t data[1] __attribute__((aligned(sizeof(tasvir_arg_promo_t)))); /* for compatibility */
-} tasvir_msg_rpc;
+    uint8_t pad_[4];
+    uint8_t data[1];  // __attribute__((aligned(sizeof(tasvir_arg_promo_t)))); /* for compatibility */
+};
 
-/**
- *
- */
-typedef struct __attribute__((__packed__)) tasvir_msg_mem {
+TASVIR_STATIC_ASSERT(offsetof(tasvir_msg_rpc, data) % sizeof(tasvir_arg_promo_t) == 0,
+                     "tasvir_msg_rpc.data is not aligned to sizeof(tasvir_arg_promo_t)");
+
+struct __attribute__((__packed__)) tasvir_msg_mem {
     tasvir_msg h;
-    tasvir_area_desc *d;
     void *addr;
     size_t len;
-    bool last;
-    tasvir_cacheline line[TASVIR_NR_CACHELINES_PER_MSG] __attribute__((aligned(TASVIR_CACHELINE_BYTES)));
-} tasvir_msg_mem;
+    uint8_t last;
+    uint64_t prev_bytes;
+    uint8_t pad_[23];
+    tasvir_cacheline line[TASVIR_NR_CACHELINES_PER_MSG];  // __attribute__((aligned(TASVIR_CACHELINE_BYTES)));
+};
 
-TASVIR_STATIC_ASSERT(sizeof(tasvir_msg_mem) - sizeof(struct rte_mbuf) - RTE_PKTMBUF_HEADROOM < 1518,
+TASVIR_STATIC_ASSERT(offsetof(tasvir_msg_mem, line[TASVIR_NR_CACHELINES_PER_MSG]) - offsetof(tasvir_msg_mem, h.eh) <
+                         1518,
                      "tasvir_msg_mem exceeds ethernet MTU.");
+TASVIR_STATIC_ASSERT(offsetof(tasvir_msg_mem, line) % TASVIR_CACHELINE_BYTES == 0,
+                     "tasvir_msg_mem.line is not cacheline-aligned");
 
 typedef struct tasvir_local_tdata tasvir_local_tdata;
 typedef struct tasvir_local_ndata tasvir_local_ndata;
@@ -130,11 +132,33 @@ typedef enum {
     TASVIR_MSG_SRC_INVALID = 0,
     TASVIR_MSG_SRC_ME = 1,
     TASVIR_MSG_SRC_LOCAL = 2,
-    TASVIR_MSG_SRC_NET2US = 3,
-    TASVIR_MSG_SRC_NET2ROOT = 4,
+    TASVIR_MSG_SRC_NET = 3,
 } tasvir_msg_src;
 
 // static const char *tasvir_msg_src_str[] = {"invalid", "me", "local", "net2us", "net2root"};
+
+/* set prior to sync by daemon and concurrently updated by all during sync */
+struct __attribute__((aligned(TASVIR_CACHELINE_BYTES))) tasvir_sync_job {
+    tasvir_area_desc *d;
+    bool self_sync;
+    bool done_stage1;  // walking the log
+    bool done_stage2;  // updating the header
+    bool done_stage3;  // postprocessing
+    atomic_size_t offset __attribute__((aligned(TASVIR_CACHELINE_BYTES)));
+    atomic_size_t bytes_seen;
+    atomic_size_t bytes_updated;
+};
+
+typedef struct tasvir_sync_item {
+    uint64_t offset_scaled;
+    uint32_t len_scaled;
+} tasvir_sync_item;
+
+typedef struct __attribute__((aligned(TASVIR_CACHELINE_BYTES))) tasvir_sync_list {
+    int changed;
+    int cnt;
+    tasvir_sync_item l[TASVIR_SYNC_LIST_LEN];
+} tasvir_sync_list;
 
 struct __attribute__((aligned(TASVIR_CACHELINE_BYTES))) tasvir_local_tdata { /* thread data */
     uint64_t time_us;
@@ -144,30 +168,8 @@ struct __attribute__((aligned(TASVIR_CACHELINE_BYTES))) tasvir_local_tdata { /* 
     tasvir_thread_state state_req; /* state transition request by thread */
     size_t prev_sync_seq;          /* prev sync sequence number. updated by thread only. */
     size_t next_sync_seq;          /* next sync sequence number. updated by daemon only. */
+    tasvir_sync_list sync_list;
 };
-
-/* set prior to sync by daemon and concurrently updated by all during sync */
-struct __attribute__((aligned(TASVIR_CACHELINE_BYTES))) tasvir_sync_job {
-    tasvir_area_desc *d;
-    bool self_sync;
-    bool done_stage1; // walking the log
-    bool done_stage2; // updating the header
-    bool done_stage3; // postprocessing
-    atomic_size_t offset __attribute__((aligned(TASVIR_CACHELINE_BYTES)));
-    atomic_size_t bytes_seen;
-    atomic_size_t bytes_updated;
-};
-
-typedef struct tasvir_sync_item {
-    uint32_t offset_scaled;
-    uint32_t len_scaled;
-} tasvir_sync_item;
-
-typedef struct __attribute__((aligned(TASVIR_CACHELINE_BYTES))) tasvir_sync_list {
-    int changed;
-    int cnt;
-    tasvir_sync_item l[TASVIR_CHANGES_PER_SYNC];
-} tasvir_sync_list;
 
 struct __attribute__((aligned(TASVIR_CACHELINE_BYTES))) tasvir_local_ndata { /* node data */
     uint64_t boot_us;
@@ -182,14 +184,16 @@ struct __attribute__((aligned(TASVIR_CACHELINE_BYTES))) tasvir_local_ndata { /* 
     atomic_size_t barrier_seq;
     pthread_mutex_t mutex_init;
     struct rte_ring *ring_ext_tx;
+    struct rte_ring *ring_mem_pending;
 
     /* daemon data */
     struct ether_addr mac_addr;
     uint16_t port_id;
 
-    tasvir_tid update_tid;
-    tasvir_tid rootcast_tid;
-    tasvir_tid nodecast_tid;
+    /* special tids */
+    tasvir_tid boot_tid;     // src tid before thread is initialized
+    tasvir_tid memcast_tid;  // dst tid for multicasting memory updates
+    tasvir_tid rpccast_tid;  // dst tid for multicasting rpc requests with unknown tid
 
     /* sync times and stats */
     uint64_t last_stat;
@@ -206,17 +210,18 @@ struct __attribute__((aligned(TASVIR_CACHELINE_BYTES))) tasvir_local_ndata { /* 
     tasvir_sync_job jobs[TASVIR_NR_SYNC_JOBS];
 
     /* thread to daemon requests */
+    bool node_init_req;
     bool sync_req;
     bool stat_reset_req;
     bool stat_update_req;
 
     /* thread data */
     tasvir_local_tdata tdata[TASVIR_NR_THREADS_LOCAL];
-    tasvir_sync_list sync_list[TASVIR_NR_THREADS_LOCAL];
 };
 
 /* thread-internal data */
 struct __attribute__((aligned(4096))) tasvir_tls_data {
+    double tsc2usec_mult;
     tasvir_area_desc *root_desc; /* root area descriptor */
     tasvir_area_desc *node_desc; /* current node's area descriptor */
     tasvir_node *node;           /* current node's global data */
@@ -241,88 +246,29 @@ _Static_assert(sizeof(tasvir_local_ndata) <= TASVIR_SIZE_LOCAL,
 
 /* function prototypes */
 
-int tasvir_attach_helper(tasvir_area_desc *, tasvir_node *);
-tasvir_thread *tasvir_init_thread(pid_t pid, uint16_t core);
-int tasvir_init_dpdk(uint16_t core);
-#ifdef TASVIR_DAEMON
-int tasvir_init_port();
-void tasvir_stats_update();
-#endif
+tasvir_area_desc *tasvir_new_alloc_desc(tasvir_area_desc);
+int tasvir_area_add_user(tasvir_area_desc *, tasvir_node *, int);
+int tasvir_area_add_user_wait(uint64_t, tasvir_area_desc *, tasvir_node *, int);
+tasvir_thread *tasvir_init_thread(pid_t);
+int tasvir_init_dpdk();
 void tasvir_init_rpc();
 int tasvir_init_finish(tasvir_thread *);
 void tasvir_sched_sync_internal();
-int tasvir_service_msg(tasvir_msg *, tasvir_msg_src);
-void tasvir_service_port_tx();
-int tasvir_service_sync();
+int tasvir_handle_msg_rpc(tasvir_msg *, tasvir_msg_src);
+void tasvir_handle_msg_rpc_request(tasvir_msg_rpc *);
+void tasvir_handle_msg_rpc_response(tasvir_msg_rpc *);
+size_t tasvir_sync_parse_log(const tasvir_area_desc *__restrict, size_t, size_t, int);
+size_t tasvir_sync_process_changes(const tasvir_area_desc *__restrict, bool, bool);
 int tasvir_sync_internal();
+
+#ifdef TASVIR_DAEMON
+int tasvir_init_port();
+void tasvir_stats_update();
+void tasvir_handle_msg_mem(tasvir_msg_mem *);
+void tasvir_service_port_tx();
 int tasvir_sync_external();
-size_t tasvir_sync_external_area(tasvir_area_desc *d, bool init);
-
-/* area utils */
-
-static inline bool tasvir_area_is_attached(const tasvir_area_desc *d, const tasvir_node *node) {
-    if (d->h && d->h->d == d) {
-        if (!node)
-            return true;
-        for (size_t i = 0; i < d->h->nr_users; i++)
-            if (d->h->users[i].node == node)
-                return true;
-    }
-    return false;
-}
-
-static inline bool tasvir_area_is_active(const tasvir_area_desc *d) {
-    return d && d->owner && d->h && (d->h->flags_ & TASVIR_AREA_CACHE_ACTIVE);
-}
-
-static inline bool tasvir_area_is_active_any(const tasvir_area_desc *d) {
-    return d && d->owner && d->h &&
-           ((d->h->flags_ & TASVIR_AREA_CACHE_ACTIVE) ||
-            (((tasvir_area_header *)tasvir_data2shadow(d->h))->flags_ & TASVIR_AREA_CACHE_ACTIVE));
-}
-
-static inline bool tasvir_area_is_local(const tasvir_area_desc *d) {
-    return tasvir_area_is_active_any(d) &&
-           ((d->h->flags_ & TASVIR_AREA_CACHE_LOCAL) ||
-            (((tasvir_area_header *)tasvir_data2shadow(d->h))->flags_ & TASVIR_AREA_CACHE_LOCAL));
-}
-
-static inline bool tasvir_area_is_local_by_tid(const tasvir_area_desc *d) {
-    return memcmp(&d->owner->tid.nid, &ttld.node->nid, sizeof(tasvir_nid)) == 0;
-}
-
-static inline bool tasvir_area_is_mapped_rw(const tasvir_area_desc *d) {
-    return tasvir_area_is_active(d) && (d->h->flags_ & TASVIR_AREA_CACHE_MAPPED_RW);
-}
-
-typedef size_t (*tasvir_fnptr_walkcb)(tasvir_area_desc *);
-static inline size_t tasvir_area_walk(tasvir_area_desc *d, tasvir_fnptr_walkcb fnptr) {
-    if (!tasvir_area_is_active_any(d))
-        return 0;
-    size_t retval = 0;
-    retval += fnptr(d);
-    if (d->type == TASVIR_AREA_TYPE_CONTAINER) {
-        tasvir_area_desc *c = tasvir_data(d);
-        for (size_t i = 0; i < d->h->nr_areas; i++) {
-            retval += tasvir_area_walk(&c[i], fnptr);
-        }
-    }
-    return retval;
-}
-
-/* i/o utils */
-
-static inline void tasvir_populate_msg_nethdr(tasvir_msg *m) {
-    m->mbuf.refcnt = 1;
-    m->mbuf.nb_segs = 1;
-    ether_addr_copy(&m->dst_tid.nid.mac_addr, &m->eh.d_addr);
-    ether_addr_copy(&ttld.ndata->mac_addr, &m->eh.s_addr);
-    m->eh.ether_type = rte_cpu_to_be_16(TASVIR_ETH_PROTO);
-
-    // FIXME: not all will be sent out
-    ttld.ndata->stats_cur.tx_bytes += m->mbuf.pkt_len;
-    ttld.ndata->stats_cur.tx_pkts++;
-}
+size_t tasvir_sync_external_area(tasvir_area_desc *);
+#endif
 
 #include "utils.h"
 

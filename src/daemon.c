@@ -15,10 +15,12 @@
 
 #define BACKTRACE_BUFSIZE 32
 
+/*
 void usage(char *exec) {
     fprintf(stderr, "Usage: %s -c core -p pciaddr [-r]\n", exec);
     exit(EXIT_FAILURE);
 }
+*/
 
 void handler(int sig) {
     void *buf[BACKTRACE_BUFSIZE];
@@ -28,8 +30,9 @@ void handler(int sig) {
     exit(1);
 }
 
-int main(int argc, char **argv) {
+int main() {
     signal(SIGSEGV, handler);
+    /*
     int core = -1;
     char *pciaddr = NULL;
 
@@ -81,9 +84,9 @@ int main(int argc, char **argv) {
         fprintf(stderr, "failed to environment variable TASVIR_PCIADDR to %s\n", pciaddr);
         return -1;
     }
+    */
 
-    tasvir_area_desc *root_desc = tasvir_init(core);
-    if (!root_desc) {
+    if (!tasvir_init()) {
         fprintf(stderr, "tasvir_init_daemon failed\n");
         return -1;
     }

@@ -95,7 +95,7 @@ class Model {
     void BatchFinish(int batch) { _data->ReduceSelect(_cmap[batch][FLAGS_wid]); }
 
     inline double &Data(int offset, bool global) {
-        return global ? _data->DataMaster()[offset] : _data->DataWorker()[offset];
+        return global ? _data->DataParent()[offset] : _data->DataWorker()[offset];
     }
 
     inline double &Data(int parameter, int coordinate, bool global) {

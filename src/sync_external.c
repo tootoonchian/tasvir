@@ -1,195 +1,175 @@
 #ifdef TASVIR_DAEMON
 #include "tasvir.h"
 
-static void tasvir_msg_mem_generate(tasvir_area_desc *d, void *addr, size_t len, bool last, bool is_rw) {
-    tasvir_msg_mem *m[TASVIR_PKT_BURST];
-    size_t i = 0;
-
-    while (rte_mempool_get_bulk(ttld.ndata->mp, (void **)m, TASVIR_PKT_BURST)) {
-        LOG_DBG("rte_mempool_get_bulk failed");
-        tasvir_service_port_tx();
+#ifdef TASVIR_DAEMON
+void tasvir_handle_msg_mem(tasvir_msg_mem *m) {
+    // FIXME: incoming only. not robust. assumes lossless in-order delivery
+    // TODO: remove the outgoing code from msg_mem_generate and bring it here
+    if (!m->h.d->h)
+        goto cleanup;
+    tasvir_area_header *h_rw = tasvir_data2rw(m->h.d->h);
+    if (h_rw->flags_ & TASVIR_AREA_FLAG_EXT_ENQUEUE) {
+        if (!rte_ring_sp_enqueue(ttld.ndata->ring_mem_pending, m))
+            return;
+        h_rw->flags_ &= ~TASVIR_AREA_FLAG_EXT_ENQUEUE;
+        h_rw->flags_ |= TASVIR_AREA_FLAG_EXT_IGNORE;
+        goto cleanup;
     }
-
-    while (len > 0) {
-        m[i]->h.dst_tid = ttld.ndata->update_tid;
-        m[i]->h.src_tid = ttld.thread->tid;
-        m[i]->h.id = ttld.nr_msgs++ % TASVIR_NR_RPC_MSG;
-        m[i]->h.type = TASVIR_MSG_TYPE_MEM;
-        m[i]->h.version = d->h->version;
-        m[i]->d = d;
-        m[i]->addr = addr;
-        m[i]->len = MIN(TASVIR_CACHELINE_BYTES * TASVIR_NR_CACHELINES_PER_MSG, len);
-        m[i]->h.mbuf.pkt_len = m[i]->h.mbuf.data_len =
-            m[i]->len + offsetof(tasvir_msg_mem, line) - offsetof(tasvir_msg, eh);
-        tasvir_stream_vec_rep(m[i]->line, is_rw ? tasvir_data2shadow(addr) : addr, m[i]->len);
-
-        addr = (uint8_t *)addr + m[i]->len;
-        len -= m[i]->len;
-        m[i]->last = len == 0 ? last : false;
-        tasvir_populate_msg_nethdr((tasvir_msg *)m[i]);
-
-        if (++i >= TASVIR_PKT_BURST) {
-            while (rte_ring_sp_enqueue_bulk(ttld.ndata->ring_ext_tx, (void **)m, i, NULL) != i)
-                tasvir_service_port_tx();
-
-            while (rte_mempool_get_bulk(ttld.ndata->mp, (void **)m, TASVIR_PKT_BURST)) {
-                LOG_DBG("rte_mempool_get_bulk failed");
-                tasvir_service_port_tx();
-            }
-            i = 0;
+    if (h_rw->last_sync_ext_v_ != m->h.version) {
+        h_rw->last_sync_ext_v_ = m->h.version;
+        h_rw->last_sync_ext_bytes_ = 0;
+        h_rw->flags_ &= ~TASVIR_AREA_FLAG_EXT_IGNORE;
+        h_rw->flags_ |= TASVIR_AREA_FLAG_EXT_PENDING;
+    }
+    if (h_rw->flags_ & TASVIR_AREA_FLAG_EXT_IGNORE || !(h_rw->flags_ & TASVIR_AREA_FLAG_EXT_PENDING)) {
+        goto cleanup;
+    }
+    if (h_rw->last_sync_ext_bytes_ != m->prev_bytes) {
+        // LOG_ERR("%s missed pkts prev_bytes=%lu vs %lu", m->h.d->name, h_rw->last_sync_ext_bytes_, m->prev_bytes);
+        h_rw->flags_ &= ~TASVIR_AREA_FLAG_EXT_PENDING;
+        h_rw->flags_ |= TASVIR_AREA_FLAG_EXT_IGNORE;
+    }
+    if (m->addr) {
+        tasvir_log(m->addr, m->len);
+        tasvir_stream_vec_rep(tasvir_data2rw(m->addr), m->line, m->len);
+        h_rw->last_sync_ext_bytes_ += m->len;
+        /* write to both versions during boot of a non-root daemon because no sync happens */
+        if (tasvir_is_booting())
+            tasvir_stream_vec_rep(tasvir_data2ro(m->addr), m->line, m->len);
+    }
+    if (m->last) {
+        h_rw->flags_ &= ~TASVIR_AREA_FLAG_EXT_PENDING;
+        h_rw->flags_ |= TASVIR_AREA_FLAG_ACTIVE;
+        if (tasvir_is_booting()) {
+            tasvir_area_header *h_ro = tasvir_data2ro(m->h.d->h);
+            h_ro->flags_ |= TASVIR_AREA_FLAG_ACTIVE;
+        } else if (ttld.ndata->time_us - ttld.ndata->last_sync_int_end > 0.5 * ttld.ndata->sync_int_us) {
+            h_rw->flags_ |= TASVIR_AREA_FLAG_EXT_ENQUEUE;
         }
     }
 
-    while (i > 0 && rte_ring_sp_enqueue_bulk(ttld.ndata->ring_ext_tx, (void **)m, i, NULL) != i)
-        tasvir_service_port_tx();
-    rte_mempool_put_bulk(ttld.ndata->mp, (void **)&m[i], TASVIR_PKT_BURST - i);
+#ifdef TASVIR_DEBUG_PRINT_MSG_MEM
+    char msg_str[256];
+    tasvir_msg_str((tasvir_msg *)m, false, true, msg_str, sizeof(msg_str));
+    LOG_DBG("%s", msg_str);
+#endif
+
+cleanup:
+    rte_mempool_put(ttld.ndata->mp, (void *)m);
 }
+#endif
 
 /* TODO: could use AVX */
-static void tasvir_rotate_logs(tasvir_area_desc *d) {
-    if (!tasvir_area_is_active(d))
-        abort();
-
-    /* always rotate the first one (assumption: rotate called right after an external sync)
+static void tasvir_rotate_logs(tasvir_area_desc *__restrict d) {
+    /* (assumption: rotate called right after an external sync)
+     * rotate the first one on every sync (done inline in tasvir_sync_parse_log)
      * rotate the second one after five seconds
      * rotate the third one after 15 seconds
      */
-    uint64_t delta_us[TASVIR_NR_AREA_LOGS - 1] = {0, 5 * S2US, 15 * S2US};
-    for (int i = TASVIR_NR_AREA_LOGS - 2; i >= 0; i--) {
-        tasvir_area_log *log = &d->h->diff_log[i];
-        tasvir_area_log *log_next = &d->h->diff_log[i + 1];
-        tasvir_area_log *log2 = tasvir_data2shadow(log);
-        tasvir_area_log *log2_next = tasvir_data2shadow(log_next);
+    const __m512i zero_v = _mm512_setzero_si512();
 
-        if (log->version_end > log->version_start && ttld.ndata->time_us - log->start_us > delta_us[i]) {
-            tasvir_log_t *ptr = log->data;
-            tasvir_log_t *ptr_next = log_next->data;
-            tasvir_log_t *ptr_last = log_next->data;
+    uint64_t delta_us[TASVIR_NR_AREA_LOGS - 1] = {0, 5 * S2US, 21 * S2US};
+    for (int i = TASVIR_NR_AREA_LOGS - 2; i > 0; i--) {
+        tasvir_area_log *__restrict l1 = &d->h->diff_log[i];
+        tasvir_area_log *__restrict l2 = &d->h->diff_log[i + 1];
+
+        bool cond = l1->version_end > l1->version_start && ttld.ndata->time_us - l1->start_us > delta_us[i];
+        if (cond) {
+            __m512i *ptr = (__m512i *)l1->data;
+            __m512i *ptr_next = (__m512i *)l2->data;
+            __m512i *ptr_last = (__m512i *)l2->data;
             for (; ptr < ptr_last; ptr++, ptr_next++) {
-                if (*ptr) {
-                    *ptr_next |= *ptr;
-                    *ptr = 0;
+                __m512i val = _mm512_load_si512(ptr);
+                __mmask16 one_mask = _mm512_test_epi64_mask(val, val);
+                if (one_mask) {
+                    __m512i val_next = _mm512_load_si512(ptr_next);
+                    _mm512_store_epi64((__m512i *)ptr_next, _mm512_or_epi64(val, val_next));
+                    _mm512_store_epi64((__m512i *)ptr, zero_v);
                 }
             }
-            LOG_DBG("%s rotating %d(v%lu-%lu,t%lu-%lu)->%d(v%lu-%lu,t%lu-%lu)", d->name, i, log->version_start,
-                    log->version_end, log->start_us, log->end_us, i + 1, log_next->version_start, log_next->version_end,
-                    log_next->start_us, log_next->end_us);
-            log->version_start = log_next->version_end = log2->version_start = log2_next->version_end =
-                log->version_end;
-            log->start_us = log_next->end_us = log2->start_us = log2_next->end_us = log->end_us;
+#if 1  // TASVIR_DEBUG_PRINT_LOG_ROTATE
+            LOG_DBG("%s rotating %d(v%lu-%lu,t%lu-%lu)->%d(v%lu-%lu,t%lu-%lu)", d->name, i, l1->version_start,
+                    l1->version_end, l1->start_us, l1->end_us, i + 1, l2->version_start, l2->version_end, l2->start_us,
+                    l2->end_us);
+#endif
+            l1->version_start = l2->version_end = l1->version_end;
+            l1->start_us = l2->end_us = l1->end_us;
         }
     }
 }
 
-size_t tasvir_sync_external_area(tasvir_area_desc *d, bool init) {
-    if (!d || !d->owner)
+size_t tasvir_sync_external_area(tasvir_area_desc *d) {
+    if (!d || !d->owner || !tasvir_area_is_local(d) || d->h->diff_log[0].version_end == 0)
         return 0;
 
-    if (d->sync_ext_us < ttld.ndata->sync_ext_us) {
-        ttld.ndata->sync_ext_us = d->sync_ext_us;
-        LOG_INFO("updating external sync interval to %luus", ttld.ndata->sync_ext_us);
-    }
-
-    if (!tasvir_area_is_local(d) || d->h->diff_log[0].version_end == 0)
+    tasvir_area_header *h_ro = tasvir_data2ro(d->h);
+    if (ttld.tdata->time_us - h_ro->last_sync_ext_us_ < d->sync_ext_us || h_ro->flags_ & TASVIR_AREA_FLAG_SLEEPING)
         return 0;
 
-    int i;
-#ifdef TASVIR_DAEMON
-    if (!d->pd && ttld.is_root) {
-        tasvir_msg_mem_generate(NULL, d, TASVIR_ALIGNX(sizeof(tasvir_area_desc), TASVIR_CACHELINE_BYTES), true, true);
-    }
-#endif
+    h_ro->last_sync_ext_us_ = ttld.tdata->time_us;
+    h_ro->last_sync_ext_bytes_ = 0;
+    bool init = ttld.is_root && (d == ttld.root_desc || d == ttld.node_desc) && ttld.ndata->node_init_req;
+    int pivot = init ? TASVIR_NR_AREA_LOGS - 1 : 0;
+    uint64_t version_min = -1;
+    for (size_t i = 0; i < d->h->nr_users; i++)
+        if (d->h->users[i].node && *d->h->users[i].version < version_min)
+            version_min = *d->h->users[i].version;
 
-    size_t nr_bits0 = 0;
-    size_t nr_bits1 = 0;
-    size_t nr_bits1_seen = 0;
-    size_t nr_bits_seen = 0;
-    size_t nr_bits_total = d->offset_log_end >> TASVIR_SHIFT_BIT;
-    uint8_t nr_bits_same;
-    uint8_t nr_bits_unit_left = MIN(TASVIR_LOG_UNIT_BITS, nr_bits_total);
-
-    uint8_t *src = (uint8_t *)d->h;
-    int pivot = 0;
-    tasvir_log_t *log[TASVIR_NR_AREA_LOGS];
-    tasvir_log_t log_val = 0;
-
-    for (pivot = 0; pivot < TASVIR_NR_AREA_LOGS; pivot++) {
-        if (!init && ttld.ndata->last_sync_ext_end > d->h->diff_log[pivot].end_us) {
+    for (; pivot < TASVIR_NR_AREA_LOGS; pivot++) {
+        if (ttld.ndata->last_sync_ext_end > d->h->diff_log[pivot].end_us &&
+            version_min >= d->h->diff_log[pivot].version_end)
             break;
-        }
-        log[pivot] = d->h->diff_log[pivot].data;
-        log_val |= *log[pivot];
     }
-
     if (pivot == 0)
         return 0;
+#ifdef TASVIR_DEBUG_PRINT_PIVOT
+    LOG_ERR("%s v=%lu pivot=%d (%lu-%lu %lu-%lu %lu-%lu %lu-%lu)", d->name, version_min, pivot,
+            d->h->diff_log[0].version_start, d->h->diff_log[0].version_end, d->h->diff_log[1].version_start,
+            d->h->diff_log[1].version_end, d->h->diff_log[2].version_start, d->h->diff_log[2].version_end,
+            d->h->diff_log[3].version_start, d->h->diff_log[3].version_end);
+#endif
 
-    bool is_rw = tasvir_area_is_mapped_rw(d);
-    while (nr_bits_total > nr_bits_seen) {
-        nr_bits_same = _lzcnt_u64(log_val);
-        if (nr_bits_same > 0) {
-            nr_bits_same = MIN(nr_bits_unit_left, nr_bits_same);
-            nr_bits_seen += nr_bits_same;
-            nr_bits0 += nr_bits_same;
-            nr_bits_unit_left -= nr_bits_same;
-            log_val <<= nr_bits_same;
-        }
-
-        if (nr_bits_unit_left > 0) {
-            if (nr_bits0 > 0) {
-                size_t tmp = (nr_bits0 + nr_bits1) << TASVIR_SHIFT_BIT;
-                /* copy over for a previous batch of 1s */
-                if (nr_bits1 > 0)
-                    tasvir_msg_mem_generate(d, src, nr_bits1 << TASVIR_SHIFT_BIT, false, is_rw);
-                src += tmp;
-                nr_bits0 = nr_bits1 = 0;
-            }
-
-            nr_bits_same = _lzcnt_u64(~log_val);
-            nr_bits_same = MIN(nr_bits_unit_left, nr_bits_same);
-            nr_bits_seen += nr_bits_same;
-            nr_bits1 += nr_bits_same;
-            nr_bits1_seen += nr_bits_same;
-            nr_bits_unit_left -= nr_bits_same;
-            log_val = (log_val << (nr_bits_same - 1)) << 1;
-        }
-
-        if (nr_bits_unit_left == 0) {
-            nr_bits_unit_left = MIN(TASVIR_LOG_UNIT_BITS, nr_bits_total - nr_bits_seen);
-            log_val = 0;
-            for (i = 0; i < pivot; i++) {
-                log[i]++;
-                log_val |= *log[i];
-            }
-        }
-    }
-
-    if (nr_bits1 > 0) {
-        tasvir_msg_mem_generate(d, src, nr_bits1 << TASVIR_SHIFT_BIT, true, is_rw);
+    size_t bytes_changed = tasvir_sync_parse_log(d, 0, d->offset_log_end, pivot);
+    if (bytes_changed) {
+        ttld.ndata->stats_cur.esync_changed_bytes += bytes_changed;
         tasvir_rotate_logs(d);
-    } else if (nr_bits1_seen > 0) {
-        tasvir_msg_mem_generate(d, NULL, 0, true, is_rw);
     }
+    ttld.ndata->stats_cur.esync_processed_bytes += d->offset_log_end;
 
-    return nr_bits1_seen << TASVIR_SHIFT_BIT;
+    return bytes_changed;
 }
-
-static size_t tasvir_sync_external_area_noinit(tasvir_area_desc *d) { return tasvir_sync_external_area(d, false); }
 
 /* FIXME: no error handling/reporting */
 int tasvir_sync_external() {
-    return 0;
-
-    /* attach to new node areas */
-    tasvir_area_desc *c = tasvir_data(ttld.root_desc);
-    for (size_t i = 0; i < ttld.root_desc->h->nr_areas; i++)
-        if (c[i].type == TASVIR_AREA_TYPE_NODE && !tasvir_area_is_attached(&c[i], ttld.node))
-            tasvir_attach(ttld.root_desc, c[i].name, false);
-
     ttld.ndata->last_sync_ext_start = ttld.ndata->time_us;
-    size_t retval = tasvir_area_walk(ttld.root_desc, &tasvir_sync_external_area_noinit);
+    /* update external sync frequency per that of subscribed areas */
+    for (size_t i = 0; i < ttld.node->nr_areas; i++) {
+        tasvir_area_desc *d = ttld.node->areas_d[i];
+        if (d->sync_ext_us >= ttld.ndata->sync_ext_us)
+            continue;
+        uint64_t sync_ext_us = tasvir_area_is_local(d) ? d->sync_ext_us / 2 : d->sync_ext_us;
+        ttld.ndata->sync_ext_us = sync_ext_us;
+        LOG_INFO("updating external sync interval to %luus", ttld.ndata->sync_ext_us);
+        if (!ttld.is_root)
+            continue;
+        tasvir_log(&ttld.root_desc->sync_ext_us, sizeof(ttld.root_desc->sync_ext_us));
+        ttld.root_desc->sync_ext_us = sync_ext_us;
+        for (size_t i = 0; i < ttld.node->nr_areas; i++) {
+            tasvir_area_desc *nd = ttld.node->areas_d[i];
+            if (nd->type == TASVIR_AREA_TYPE_NODE) {
+                tasvir_log(&nd->sync_ext_us, sizeof(nd->sync_ext_us));
+                nd->sync_ext_us = sync_ext_us;
+            }
+        }
+    }
+
+    size_t retval = tasvir_area_walk(ttld.root_desc, &tasvir_sync_external_area);
+    ttld.ndata->node_init_req = false;
     ttld.ndata->time_us = tasvir_time_us();
     ttld.ndata->last_sync_ext_end = ttld.ndata->time_us;
+    ttld.ndata->stats_cur.esync_cnt++;
+    ttld.ndata->stats_cur.esync_us += ttld.ndata->last_sync_ext_end - ttld.ndata->last_sync_ext_start;
+
     return retval > 0 ? 0 : -1;
 }
 #endif
