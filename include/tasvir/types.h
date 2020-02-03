@@ -119,28 +119,26 @@ typedef struct tasvir_area_desc {
     tasvir_area_header *h; /* the header */
     tasvir_thread *owner;  /* current owner */
     size_t len;            /* area length including the metadata (header and log) */
-    size_t offset_log_end; /* offset of last loggable byte */
-    size_t nr_areas_max;   /* maximum number of child areas; valid for container type areas */
-    union {
-        tasvir_str name;
-        tasvir_str_static name0;
-    };                     /* name of the area */
-    uint64_t boot_us;      /* time first initialized in microseconds */
+    size_t len_logged;     /* area length for log processing */
     uint64_t sync_int_us;  /* internal synchronization interval in microseconds */
     uint64_t sync_ext_us;  /* external synchronization interval in microseconds */
     tasvir_area_type type; /* area type */
+    union {
+        tasvir_str name;
+        tasvir_str_static name0;
+    }; /* name of the area */
 } tasvir_area_desc;
 
 /**
  *
  */
-typedef struct tasvir_area_log {
+typedef struct tasvir_area_log_header {
     uint64_t version_start;
-    uint64_t start_us;
     uint64_t version_end;
+    uint64_t start_us;
     uint64_t end_us;
     tasvir_log_t *data;
-} tasvir_area_log;
+} tasvir_area_log_header;
 
 /**
  *
@@ -153,20 +151,28 @@ typedef struct __attribute__((aligned(TASVIR_CACHELINE_BYTES))) tasvir_area_head
             uint64_t last_sync_ext_bytes_;
             uint64_t last_sync_ext_us_;
             uint64_t last_sync_ext_v_;
+            void *extent_hooks_;
+            int arena_ind_;
         };
 #endif
         uint8_t pad_[1 << TASVIR_SHIFT_BIT];
-    }; /* guaranteed to be local (not to be synced) */
+    }; /* guaranteed to be local, i.e., not synced */
     tasvir_area_desc *d;
     uint64_t version;
     uint64_t time_us;
-    size_t nr_areas;
+
+    size_t len_dalloc;
+
+    tasvir_area_log_header diff_log[TASVIR_NR_AREA_LOGS];
+
     size_t nr_users;
-    tasvir_area_log diff_log[TASVIR_NR_AREA_LOGS];
     struct {
         tasvir_node *node;
         uint64_t *version;
     } users[TASVIR_NR_NODES];
+
+    size_t nr_areas;
+    tasvir_area_desc child[1]; /* variable-length array (nr_areas) */
 } tasvir_area_header;
 
 /**

@@ -70,8 +70,8 @@ static void tasvir_rotate_logs(tasvir_area_desc *__restrict d) {
 
     uint64_t delta_us[TASVIR_NR_AREA_LOGS - 1] = {0, 5 * S2US, 21 * S2US};
     for (int i = TASVIR_NR_AREA_LOGS - 2; i > 0; i--) {
-        tasvir_area_log *__restrict l1 = &d->h->diff_log[i];
-        tasvir_area_log *__restrict l2 = &d->h->diff_log[i + 1];
+        tasvir_area_log_header *__restrict l1 = &d->h->diff_log[i];
+        tasvir_area_log_header *__restrict l2 = &d->h->diff_log[i + 1];
 
         bool cond = l1->version_end > l1->version_start && ttld.ndata->time_us - l1->start_us > delta_us[i];
         if (cond) {
@@ -108,18 +108,14 @@ size_t tasvir_sync_external_area(tasvir_area_desc *d) {
 
     h_ro->last_sync_ext_us_ = ttld.tdata->time_us;
     h_ro->last_sync_ext_bytes_ = 0;
-    bool init = ttld.is_root && (d == ttld.root_desc || d == ttld.node_desc) && ttld.ndata->node_init_req;
+    bool init = ttld.ndata->is_root && (d == ttld.root_desc || d == ttld.node_desc) && ttld.ndata->node_init_req;
     int pivot = init ? TASVIR_NR_AREA_LOGS - 1 : 0;
     uint64_t version_min = -1;
     for (size_t i = 0; i < d->h->nr_users; i++)
         if (d->h->users[i].node && *d->h->users[i].version < version_min)
             version_min = *d->h->users[i].version;
-
-    for (; pivot < TASVIR_NR_AREA_LOGS; pivot++) {
-        if (ttld.ndata->last_sync_ext_end > d->h->diff_log[pivot].end_us &&
-            version_min >= d->h->diff_log[pivot].version_end)
-            break;
-    }
+    for (; pivot < TASVIR_NR_AREA_LOGS && version_min < d->h->diff_log[pivot].version_end; pivot++)
+        ;
     if (pivot == 0)
         return 0;
 #ifdef TASVIR_DEBUG_PRINT_PIVOT
@@ -129,12 +125,12 @@ size_t tasvir_sync_external_area(tasvir_area_desc *d) {
             d->h->diff_log[3].version_start, d->h->diff_log[3].version_end);
 #endif
 
-    size_t bytes_changed = tasvir_sync_parse_log(d, 0, d->offset_log_end, pivot);
+    size_t bytes_changed = tasvir_sync_parse_log(d, 0, d->len_logged, pivot);
     if (bytes_changed) {
         ttld.ndata->stats_cur.esync_changed_bytes += bytes_changed;
         tasvir_rotate_logs(d);
     }
-    ttld.ndata->stats_cur.esync_processed_bytes += d->offset_log_end;
+    ttld.ndata->stats_cur.esync_processed_bytes += d->len_logged;
 
     return bytes_changed;
 }
@@ -150,7 +146,7 @@ int tasvir_sync_external() {
         uint64_t sync_ext_us = tasvir_area_is_local(d) ? d->sync_ext_us / 2 : d->sync_ext_us;
         ttld.ndata->sync_ext_us = sync_ext_us;
         LOG_INFO("updating external sync interval to %luus", ttld.ndata->sync_ext_us);
-        if (!ttld.is_root)
+        if (!ttld.ndata->is_root)
             continue;
         tasvir_log(&ttld.root_desc->sync_ext_us, sizeof(ttld.root_desc->sync_ext_us));
         ttld.root_desc->sync_ext_us = sync_ext_us;

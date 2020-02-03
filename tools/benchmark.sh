@@ -243,10 +243,10 @@ test_sync_int_scale() {
 
 test_latency() {
     export host_list="c21 c22 c23 c24 c25 c26 c27 c28"
-    nr_workers=1 counter_sync_int_us=1 counter_sync_ext_us=1 counter_count_to=100 "$SCRIPTDIR/run.sh" counter
     for nr_nodes in {1..8}; do
         for nr_workers in {1..27..2}; do
-            [[ $nr_workers -ne 1 ]] && continue
+            nr_workers=1
+            # [[ $nr_workers -ne 1 ]] && continue
             printf -v host_nr_workers "$((nr_workers + 1)) %.0s" $(seq 1 $nr_nodes)
             nr_workers=$((nr_nodes * nr_workers))
             export host_nr_workers nr_workers

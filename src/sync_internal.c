@@ -14,11 +14,9 @@ void tasvir_activate(bool active) {
 
 #ifdef TASVIR_DAEMON
 static void tasvir_kill_thread_ownership(tasvir_thread *t, tasvir_area_desc *d) {
-    if (d->type == TASVIR_AREA_TYPE_CONTAINER) {
-        tasvir_area_desc *c = tasvir_data(d);
+    if (d->type == TASVIR_AREA_TYPE_CONTAINER)
         for (size_t i = 0; i < d->h->nr_areas; i++)
-            tasvir_kill_thread_ownership(t, &c[i]);
-    }
+            tasvir_kill_thread_ownership(t, &d->h->child[i]);
     if (d->owner == t)
         tasvir_update_owner(d, ttld.thread);
 }
@@ -62,10 +60,11 @@ static size_t tasvir_sched_sync_internal_area(tasvir_area_desc *d) {
     }
     tasvir_sync_job *j = &ttld.ndata->jobs[ttld.ndata->nr_jobs];
     j->d = d;
+    j->owner = d->owner;
     /* FIXME: adjust thresholds per uarch
      * self sync for small areas (<500KB)
      */
-    j->self_sync = d->offset_log_end < 500 * KB;
+    j->self_sync = d->len_logged < 500 * KB;
     j->done_stage1 = false;
     j->done_stage2 = false;
     j->done_stage3 = false;
@@ -73,7 +72,7 @@ static size_t tasvir_sched_sync_internal_area(tasvir_area_desc *d) {
     j->bytes_seen = 0;
     j->bytes_updated = 0;
 
-    ttld.ndata->job_bytes += d->offset_log_end;
+    ttld.ndata->job_bytes += h_rw->flags_ & TASVIR_AREA_FLAG_DYNAMIC ? h_rw->len_dalloc : d->len_logged;
     ttld.ndata->nr_jobs++;
     return ttld.ndata->job_bytes;
 }
@@ -169,10 +168,11 @@ static bool tasvir_sync_internal_job(tasvir_sync_job *j) {
     size_t job_bytes = ttld.ndata->job_bytes;
 
     tasvir_area_header *__restrict h_rw = tasvir_data2rw(d->h);
+    size_t len_logged = h_rw->flags_ & TASVIR_AREA_FLAG_DYNAMIC ? h_rw->len_dalloc : d->len_logged;
 
     while (!j->done_stage1 &&
-           (offset = atomic_fetch_add_explicit(&j->offset, job_bytes, memory_order_relaxed)) < d->offset_log_end) {
-        size_t len = MIN(job_bytes, d->offset_log_end - offset);
+           (offset = atomic_fetch_add_explicit(&j->offset, job_bytes, memory_order_relaxed)) < len_logged) {
+        size_t len = MIN(job_bytes, len_logged - offset);
         tasvir_sync_parse_log(d, offset, len, 0);
         seen += len;
     }
@@ -187,12 +187,19 @@ static bool tasvir_sync_internal_job(tasvir_sync_job *j) {
     if (updated)
         atomic_fetch_add_explicit(&j->bytes_updated, updated, memory_order_relaxed);
 
-    if (seen + atomic_fetch_add(&j->bytes_seen, seen) == d->offset_log_end) {
+    if (seen + atomic_fetch_add(&j->bytes_seen, seen) == len_logged) {
         if (h_rw->flags_ & TASVIR_AREA_FLAG_EXT_ENQUEUE)
             h_rw->flags_ &= ~TASVIR_AREA_FLAG_EXT_ENQUEUE;
         bool has_changes = updated || atomic_load_explicit(&j->bytes_updated, memory_order_relaxed);
         if (has_changes) {
             tasvir_area_header *__restrict h_ro = tasvir_data2ro(d->h);
+            if (d->owner != j->owner) {
+                if (tasvir_thread_is_local(d->owner)) {
+                    h_rw->flags_ |= TASVIR_AREA_FLAG_LOCAL;
+                } else {
+                    h_rw->flags_ &= ~TASVIR_AREA_FLAG_LOCAL;
+                }
+            }
             h_ro->flags_ = h_rw->flags_ & (TASVIR_AREA_FLAG_ACTIVE | TASVIR_AREA_FLAG_LOCAL);
             if (is_local) {
                 h_ro->time_us = h_ro->diff_log[0].end_us = h_rw->time_us = h_rw->diff_log[0].end_us =
@@ -214,10 +221,12 @@ static bool tasvir_sync_internal_job(tasvir_sync_job *j) {
 }
 
 static bool tasvir_sync_internal_job_postprocess(tasvir_sync_job *j) {
+    const tasvir_area_desc *__restrict d = j->d;
+    if (j->owner != d->owner)
+        tasvir_update_va(d, d->owner == ttld.thread);
     if (j->done_stage3)
         return true;
 
-    const tasvir_area_desc *__restrict d = j->d;
     bool is_local_writer = d->owner == ttld.thread;
     if (!is_local_writer)
 #ifdef TASVIR_DAEMON
@@ -229,7 +238,7 @@ static bool tasvir_sync_internal_job_postprocess(tasvir_sync_job *j) {
         /* FIXME: adjust thresholds per uarch
          * here I should really only reclaim modified lines but tracking them is a bit hard
          */
-        size_t log_units = d->offset_log_end >> TASVIR_SHIFT_UNIT;
+        size_t log_units = d->len_logged >> TASVIR_SHIFT_UNIT;
         size_t log_bytes = log_units * sizeof(tasvir_log_t);
         /* FIXME: 512KB was experimentally set here but likely function of L2 size and uarch-dependent */
         if (log_bytes < 512 * KB) {

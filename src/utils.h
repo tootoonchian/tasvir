@@ -24,6 +24,8 @@
                 ttld.ndata ? (ttld.ndata->time_us - ttld.ndata->boot_us) / 1000. : 0, __func__, ##__VA_ARGS__); \
     }
 
+#define UNUSED __attribute__((unused))
+
 #ifndef TASVIR_LOG_LEVEL
 #define TASVIR_LOG_LEVEL 7
 #endif
@@ -101,6 +103,7 @@ static inline tasvir_log_t *tasvir_data2log(void *data) {
 }
 static inline void *tasvir_data2ro(void *data) { return (uint8_t *)data + TASVIR_OFFSET_RO; }
 static inline void *tasvir_data2rw(void *data) { return (uint8_t *)data + TASVIR_OFFSET_RW; }
+void tasvir_update_va(const tasvir_area_desc *d, bool is_rw);
 
 /* memory copy/strem */
 
@@ -194,6 +197,10 @@ static inline void tasvir_stream_vec_rep(void *__restrict dst, const void *__res
 static inline bool tasvir_is_booting() { return !ttld.thread || (ttld.tdata->state == TASVIR_THREAD_STATE_BOOTING); }
 
 static inline bool tasvir_is_running() { return ttld.thread && (ttld.tdata->state == TASVIR_THREAD_STATE_RUNNING); }
+
+static inline bool tasvir_thread_is_local(tasvir_thread *t) {
+    return memcmp(&t->tid.nid, &ttld.ndata->boot_tid.nid, sizeof(tasvir_nid)) == 0;
+}
 
 /* net */
 

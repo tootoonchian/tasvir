@@ -54,21 +54,11 @@ set(TASVIR_COMPILE_OPTS
     $<$<C_COMPILER_ID:Clang>:-fcolor-diagnostics -Wno-gnu-zero-variadic-macro-arguments -Wno-address-of-packed-member>
     )
 set(TASVIR_LINK_DIRS "$ENV{RTE_SDK}/$ENV{RTE_TARGET}/lib")
-set(TASVIR_LINK_LIBS dl m numa rt pthread "-Wl,--whole-archive -ldpdk -Wl,--no-whole-archive")
+set(TASVIR_LINK_LIBS dl m numa rt pthread jemalloc "-Wl,--whole-archive -ldpdk -Wl,--no-whole-archive")
 set(TASVIR_LINK_OPTS -flto $<$<C_COMPILER_ID:GNU>:-fuse-linker-plugin>)
 
 file(GLOB_RECURSE TASVIR_HDR include/*)
-set(TASVIR_SRC src/area.c src/dpdk.c src/init.c src/rpc.c src/service.c src/stat.c src/sync.c src/sync_internal.c src/utils.c src/tasvir.h src/utils.h)
-
-add_library(tasvir_obj OBJECT ${TASVIR_SRC})
-target_compile_features(tasvir_obj PUBLIC c_std_11 cxx_std_11)
-target_compile_options(tasvir_obj PUBLIC ${TASVIR_COMPILE_OPTS})
-target_include_directories(tasvir_obj PUBLIC include)
-target_include_directories(tasvir_obj SYSTEM PUBLIC $ENV{RTE_SDK}/$ENV{RTE_TARGET}/include)
-target_link_directories(tasvir_obj PUBLIC ${TASVIR_LINK_DIRS})
-target_link_libraries(tasvir_obj PUBLIC ${TASVIR_LINK_LIBS})
-target_link_options(tasvir_obj PUBLIC ${TASVIR_LINK_OPTS})
-set_target_properties(tasvir_obj PROPERTIES POSITION_INDEPENDENT_CODE ON PUBLIC_HEADER "${TASVIR_HDR}" VERSION ${PROJECT_VERSION})
+set(TASVIR_SRC src/alloc.c src/area.c src/dpdk.c src/init.c src/rpc.c src/service.c src/stat.c src/sync.c src/sync_internal.c src/utils.c src/tasvir.h src/utils.h)
 
 add_executable(tasvir_daemon ${TASVIR_SRC} src/daemon.c src/sync_external.c)
 target_compile_definitions(tasvir_daemon PRIVATE TASVIR_DAEMON=1)
@@ -81,13 +71,23 @@ target_link_libraries(tasvir_daemon PRIVATE ${TASVIR_LINK_LIBS})
 target_link_options(tasvir_daemon PRIVATE ${TASVIR_LINK_OPTS})
 set_target_properties(tasvir_daemon PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-#add_library(tasvir SHARED $<TARGET_OBJECTS:tasvir_obj>)
-#target_link_libraries(tasvir PUBLIC tasvir_obj)
-#set_target_properties(tasvir PROPERTIES POSITION_INDEPENDENT_CODE ON PUBLIC_HEADER "${TASVIR_HDR}" VERSION ${PROJECT_VERSION})
+add_library(tasvir_obj OBJECT ${TASVIR_SRC})
+target_compile_features(tasvir_obj PUBLIC c_std_11 cxx_std_11)
+target_compile_options(tasvir_obj PUBLIC ${TASVIR_COMPILE_OPTS})
+target_include_directories(tasvir_obj PUBLIC include)
+target_include_directories(tasvir_obj SYSTEM PUBLIC $ENV{RTE_SDK}/$ENV{RTE_TARGET}/include)
+target_link_directories(tasvir_obj PUBLIC ${TASVIR_LINK_DIRS})
+target_link_libraries(tasvir_obj PUBLIC ${TASVIR_LINK_LIBS})
+target_link_options(tasvir_obj PUBLIC ${TASVIR_LINK_OPTS})
+set_target_properties(tasvir_obj PROPERTIES POSITION_INDEPENDENT_CODE ON PUBLIC_HEADER "${TASVIR_HDR}" VERSION ${PROJECT_VERSION})
 
-#add_library(tasvir_static STATIC $<TARGET_OBJECTS:tasvir_obj>)
-#target_link_libraries(tasvir_static PUBLIC tasvir_obj)
-#set_target_properties(tasvir_static PROPERTIES POSITION_INDEPENDENT_CODE ON PUBLIC_HEADER "${TASVIR_HDR}" VERSION ${PROJECT_VERSION})
+#add_library(tasvir_shared SHARED $<TARGET_OBJECTS:tasvir_obj>)
+#target_link_libraries(tasvir_shared PUBLIC tasvir_obj)
+#set_target_properties(tasvir_shared PROPERTIES POSITION_INDEPENDENT_CODE ON PUBLIC_HEADER "${TASVIR_HDR}" VERSION ${PROJECT_VERSION} OUTPUT_NAME tasvir)
+
+add_library(tasvir_static STATIC $<TARGET_OBJECTS:tasvir_obj>)
+target_link_libraries(tasvir_static PUBLIC tasvir_obj)
+set_target_properties(tasvir_static PROPERTIES POSITION_INDEPENDENT_CODE ON PUBLIC_HEADER "${TASVIR_HDR}" VERSION ${PROJECT_VERSION} OUTPUT_NAME tasvir)
 
 #install(TARGETS tasvir
 #        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}

@@ -74,9 +74,6 @@ static tasvir_rpc_status *tasvir_vrpc(tasvir_area_desc *d, tasvir_fnptr fnptr, v
         case 512:
             *(struct tasvir_512b_arg_t *)ptr = va_arg(argp, struct tasvir_512b_arg_t);
             break;
-        case (sizeof(tasvir_str_static)):
-            *(tasvir_str_static *)ptr = va_arg(argp, tasvir_str_static);
-            break;
         case (sizeof(tasvir_area_desc)):
             *(tasvir_area_desc *)ptr = va_arg(argp, tasvir_area_desc);
             break;
@@ -93,7 +90,7 @@ static tasvir_rpc_status *tasvir_vrpc(tasvir_area_desc *d, tasvir_fnptr fnptr, v
     m->h.mbuf.pkt_len = m->h.mbuf.data_len =
         TASVIR_ALIGN_ARG((fnd->argc > 0 ? fnd->arg_lens[i - 1] : 0) + ptr - (uint8_t *)&m->h.eh);
 
-    if (tasvir_handle_msg_rpc((tasvir_msg *)m, TASVIR_MSG_SRC_ME) != 0)
+    if (tasvir_handle_msg_rpc((tasvir_msg *)m, TASVIR_MSG_SRC_ME))
         return NULL;
 
     if (fnd->flags & TASVIR_FN_NOACK)
@@ -258,7 +255,7 @@ void tasvir_handle_msg_rpc_request(tasvir_msg_rpc *m) {
     }
     /* receiver compares msg version with the area version to ensure updates are seen */
     m->h.version = m->h.d->h ? m->h.d->h->version : 0;
-    if (tasvir_handle_msg_rpc((tasvir_msg *)m, TASVIR_MSG_SRC_ME) != 0) {
+    if (tasvir_handle_msg_rpc((tasvir_msg *)m, TASVIR_MSG_SRC_ME)) {
         LOG_DBG("failed to respond");
     }
 }
@@ -280,18 +277,22 @@ int tasvir_handle_msg_rpc(tasvir_msg *m, tasvir_msg_src src) {
     bool is_dst_me;
 
     // (is_dst_local && (!ttld.thread || m->dst_tid.idx == ttld.thread->tid.idx));
-    if (m->type == TASVIR_MSG_TYPE_RPC_REQUEST) {
+    switch (m->type) {
+    case TASVIR_MSG_TYPE_RPC_REQUEST:
         is_dst_local = tasvir_area_is_local(m->d);
         is_dst_me = is_dst_local && m->d->owner == ttld.thread;
-    } else if (m->type == TASVIR_MSG_TYPE_RPC_RESPONSE) {
+        break;
+    case TASVIR_MSG_TYPE_RPC_RESPONSE:
         is_dst_local = !memcmp(&m->dst_tid.nid, &ttld.ndata->boot_tid.nid, sizeof(tasvir_nid));
         is_dst_me = is_dst_local && (ttld.thread ? !memcmp(&m->dst_tid, &ttld.thread->tid, sizeof(tasvir_tid))
                                                  : !memcmp(&m->dst_tid, &ttld.ndata->boot_tid, sizeof(tasvir_tid)));
-    } else {
+        break;
+    default:
         LOG_DBG("received an unrecognized message type %d", m->type);
         rte_mempool_put(ttld.ndata->mp, (void *)m);
         return -1;
     }
+
     if (src == TASVIR_MSG_SRC_NET && !is_dst_local) {
         rte_mempool_put(ttld.ndata->mp, (void *)m);
         return -1;
@@ -303,8 +304,19 @@ int tasvir_handle_msg_rpc(tasvir_msg *m, tasvir_msg_src src) {
     LOG_DBG("%s", msg_str);
 #endif
 
-    /* begin message routing */
-    if (!is_dst_me) { /* no-op when message is ours */
+    if (is_dst_me) {
+        switch (m->type) {
+        case TASVIR_MSG_TYPE_RPC_REQUEST:
+            tasvir_handle_msg_rpc_request((tasvir_msg_rpc *)m);
+            break;
+        case TASVIR_MSG_TYPE_RPC_RESPONSE:
+            tasvir_handle_msg_rpc_response((tasvir_msg_rpc *)m);
+            break;
+        default:
+            break;
+        }
+    } else {
+        /* route the message */
         struct rte_ring *r;
 #ifdef TASVIR_DAEMON
         if (is_dst_local) {
@@ -322,14 +334,7 @@ int tasvir_handle_msg_rpc(tasvir_msg *m, tasvir_msg_src src) {
             rte_mempool_put(ttld.ndata->mp, (void *)m);
             return -1;
         }
-        return 0;
     }
-    /* end message routing */
 
-    if (m->type == TASVIR_MSG_TYPE_RPC_REQUEST) {
-        tasvir_handle_msg_rpc_request((tasvir_msg_rpc *)m);
-    } else if (m->type == TASVIR_MSG_TYPE_RPC_RESPONSE) {
-        tasvir_handle_msg_rpc_response((tasvir_msg_rpc *)m);
-    }
     return 0;
 }

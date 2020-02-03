@@ -12,7 +12,7 @@ int tasvir_init_dpdk() {
 
     core_str = getenv("TASVIR_CORE");
     if (!core_str) {
-        LOG_ERR("environment variable TASVIR_CORE is not set");
+        LOG_ERR("DPDK initialization failed (TASVIR_CORE is not set)");
         return -1;
     }
     errno = 0;
@@ -66,7 +66,9 @@ int tasvir_init_dpdk() {
 int tasvir_init_port() {
     const char* pciaddr = getenv("TASVIR_PCIADDR");
     if (!pciaddr) {
-        LOG_ERR("environment variable TASVIR_PCIADDR is not set... skipping network setup");
+        LOG_INFO("skipping network setup (TASVIR_PCIADDR is not set)");
+        ttld.ndata->port_id = -1;
+        memset(&ttld.ndata->boot_tid.nid, 0, sizeof(ttld.ndata->boot_tid.nid));
         return 0;
     }
 

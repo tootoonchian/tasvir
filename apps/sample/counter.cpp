@@ -64,7 +64,7 @@ int main(int argc, char **argv) {
         if (rep == 1) {
             auto duration =
                 std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start);
-            printf("nr_workers=%d sync_int_us=%lu sync_ext_us=%lu time_us=%lu", nr_workers, sync_int_us, sync_ext_us,
+            printf("nr_workers=%d sync_int_us=%lu sync_ext_us=%lu time_us=%lu\n", nr_workers, sync_int_us, sync_ext_us,
                    duration.count() / count_to);
         }
     }

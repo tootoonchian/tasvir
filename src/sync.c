@@ -57,8 +57,7 @@ static void tasvir_msg_mem_generate(const tasvir_area_desc *__restrict d, void *
 }
 #endif
 
-size_t tasvir_sync_process_changes(const tasvir_area_desc *d __attribute__((unused)), bool reset_changed,
-                                   bool external __attribute__((unused))) {
+size_t tasvir_sync_process_changes(UNUSED const tasvir_area_desc *d, bool reset_changed, UNUSED bool external) {
     tasvir_sync_list *__restrict l = &ttld.tdata->sync_list;
     for (int i = 0; i < l->cnt; i++) {
         size_t offset = l->l[i].offset_scaled << TASVIR_SHIFT_BIT;

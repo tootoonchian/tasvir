@@ -67,7 +67,7 @@ TASVIR_PUBLIC __attribute__((noinline)) int tasvir_service();
  * @param sync_req
  *   Request daemon to schedule a synchronization if set.
  * @return
- *   0 if an internal synchronization took place, an error code (-1 for now) otherwise.
+ *   0 if an internal synchronization took place, or an error code (-1 for now) otherwise.
  * @note
  *   Same as tasvir_service() except that it requests and waits for an immediate internal synchronization.
  * @note
@@ -96,6 +96,21 @@ TASVIR_PUBLIC __attribute__((noinline)) void tasvir_activate(bool active);
  *   atomically elsewhere. Of course, do not forget to reactivate it :-)
  */
 TASVIR_PUBLIC __attribute__((noinline)) void tasvir_area_activate(tasvir_area_desc *d, bool active);
+
+/**
+ * @brief
+ *   Enable dynamic allocation for an area.
+ *
+ * @param d
+ *   The area descriptor.
+ * @param replace_malloc
+ *   Set to true if malloc is to be backed by the area, and false to revert to default (heap).
+ * @return
+ *   0 on success, or an error code (-1 for now) otherwise.
+ */
+TASVIR_PUBLIC __attribute__((noinline)) int tasvir_area_enable_dynamic_allocation(tasvir_area_desc *d,
+                                                                                  bool replace_malloc,
+                                                                                  bool disable_tcache);
 
 /**
  * @brief

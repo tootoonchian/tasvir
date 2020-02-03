@@ -10,154 +10,161 @@
 
 namespace tasvir {
 
+enum class OpType {
+    MAX,     // maximum
+    MIN,     // minimum
+    SUM,     // sum
+    AVG,     // average
+    PROD,    // product
+    LAND,    // logical and
+    BAND,    // bit-wise and
+    LOR,     // logical or
+    BOR,     // bit-wise or
+    LXOR,    // logical xor
+    BXOR,    // bit-wise xor
+    MAXLOC,  // max value and location
+    MINLOC,  // min value and location
+};
+
 template <typename T = double>
 class Array {
    public:
     typedef T value_type;
     typedef size_t size_type;
-    enum OpType {
-
-    };
 
     Array() = default;
     ~Array() = default;
 
-    inline T* DataParent() { return _parent->_data; }
-    inline T* DataWorker() { return _data; }
+    T* begin() { return data_; }
+    T* end() { return data_ + size_; }
+
+    inline T* DataLeader() { return ranks_[0]->data_; }
+    inline T* Data() { return data_; }
 
     /* Allocate and initialize the data structure in a tasvir area.
      * Blocks until all instances are up and all areas are created
      * Call once per name.
      */
-    static Array<T>* Allocate(const char* parent_name, uint64_t wid, std::size_t nr_workers, std::size_t nr_elements);
+    static Array<T>* Allocate(const char* array_name, uint32_t rank, uint32_t nr_ranks, uint32_t nr_nodes,
+                              std::size_t size, std::size_t capacity, uint64_t sync_int_us = 10000,
+                              uint64_t sync_ext_us = 50000);
 
-    void Barrier() {
-        std::size_t wid;
-        _version_done = _version;
-        tasvir_log(&_version_done, sizeof(_version_done));
-        tasvir_service_wait(5 * S2US, true);
-
-        if (_wid == 0) {
-            for (wid = 0; wid < _nr_workers; wid++)
-                while (_workers[wid]->_version_done != _parent->_version)
-                    tasvir_service_wait(S2US, false);
-            _parent->_version_done = _parent->_version;
-            _parent->_version++;
-            tasvir_log(&_parent->_version_done, sizeof(_version_done));
-            tasvir_log(&_parent->_version, sizeof(_version));
-        }
-
-        /* block until parent changes version */
-        while (_version_done == _parent->_version)
-            tasvir_service();
-
-        _version = _parent->_version;
-        tasvir_log(&_version, sizeof(_version));
+    bool Resize(std::size_t new_size) {
+        if (new_size > capacity_)
+            return false;
+        size_ = new_size;
+        return true;
     }
 
-    void ReduceAdd() {
-        if (_wid != 0)
-            return;
-        tasvir_log(_parent->_data, sizeof(double) * _size);
-        std::fill(_parent->_data, _parent->_data + _size, 0);
-        for (std::size_t w = 0; w < _nr_workers; w++) {
-            for (int i = 0; i < _size; i++) {
-                _parent->_data[i] += _workers[w]->_data[i];
+    void Barrier() {
+        if (rank_) {
+            /* wait for master to propose a new round */
+            while (bcnt_ == ranks_[0]->bcnt_)
+                tasvir_service_wait(S2US, false);
+            bcnt_ = ranks_[0]->bcnt_;
+        } else {
+            bcnt_++;
+        }
+        tasvir_log(&bcnt_, sizeof(bcnt_));
+        tasvir_service_wait(S2US, true);
+        /* block for everyone to catch up */
+        for (uint32_t r = 0; r < nr_ranks_; r++)
+            while (bcnt_ != ranks_[r]->bcnt_)
+                tasvir_service_wait(S2US, false);
+    }
+
+    template <OpType op>
+    void AllReduce() {
+        if (op == OpType::SUM || op == OpType::AVG) {
+            tasvir_log(data_, sizeof(T) * size_);
+            for (std::size_t i = 0; i < size_; i++) {
+                for (uint32_t r = 0; r < nr_ranks_; r++)
+                    if (r != rank_)
+                        data_[i] += ranks_[r]->data_[i];
+                if (op == OpType::AVG)
+                    data_[i] /= nr_ranks_;
             }
         }
     }
 
-    template <typename Map>
-    void ReduceSelect(const Map& map) {
-        for (const auto& c : map)
-            std::copy(&_data[c[0]], &_data[c[1]], &_parent->_data[c[0]]);
+    template <OpType>
+    void Reduce() {
+        if (rank_ == 0)
+            return AllReduce();
     }
 
     template <typename Map>
-    void CopySelect(const Map& map) {
-        for (const auto& c : map)
-            std::copy(&_parent->_data[c[0]], &_parent->_data[c[1]], &_data[c[0]]);
+    void Scatter(Map const& map) {
+        for (auto const& c : map)
+            std::copy(data_ + c[0], data_ + c[1], ranks_[0]->data_ + c[0]);
+    }
+
+    template <typename Map>
+    void Gather(Map const& map) {
+        for (auto const& c : map)
+            std::copy(ranks_[0]->data_ + c[0], ranks_[0]->data_ + c[1], data_ + c[0]);
     }
 
    private:
     static constexpr uint64_t MS2US = 1000;
     static constexpr uint64_t S2US = 1000 * MS2US;
-    size_type _size; /* the number of elements in the array */
 
-    std::size_t _nr_workers; /* number of workers under this */
-    uint64_t _wid;           /* worker identifier */
-    uint64_t _version;       /* version we are processing now */
-    uint64_t _version_done;  /* version we finished processing last */
-    uint64_t _initialized;   /* sentinel to ensure initialization */
+    size_type size_;     /* number of elements in the array */
+    size_type capacity_; /* array buffer capacity in elements */
 
-    alignas(64) Array<T>* _parent;   /* pointer to the parent */
-    Array<T>* _workers[1024];        /* pointer to workers each with their own version of the data */
-    alignas(64) value_type _data[1]; /* raw memory for data */
+    uint32_t bcnt_;     /* barrier counter */
+    uint32_t rank_;     /* rank */
+    uint32_t nr_ranks_; /* number of ranks */
+    uint32_t nr_nodes_; /* number of nodes */
+
+    alignas(64) Array<T>* ranks_[256]; /* pointer to all ranks */
+    alignas(64) value_type data_[1];   /* raw memory for data */
 };
 
 template <typename T>
-Array<T>* Array<T>::Allocate(const char* parent_name, uint64_t wid, std::size_t nr_workers, std::size_t nr_elements) {
+Array<T>* Array<T>::Allocate(const char* array_name, uint32_t rank, uint32_t nr_ranks, uint32_t nr_nodes,
+                             std::size_t size, std::size_t capacity, uint64_t sync_int_us, uint64_t sync_ext_us) {
     static_assert(std::is_pod<Array<T>>::value, "Array<T> is not POD.");
     static_assert(std::is_trivial<Array<T>>::value, "Array<T> is not trivial.");
     static_assert(std::is_trivially_copyable<Array<T>>::value, "Array<T> is not trivially copyable.");
 
-    Array<T>* parent;
-    Array<T>* worker;
+    Array<T>* me;
 
     tasvir_area_desc* d;
     tasvir_str name;
 
     tasvir_area_desc param = {};
-    param.len = sizeof(T) * nr_elements + sizeof(Array<T>);
-    param.sync_int_us = 50 * MS2US;
-    param.sync_ext_us = 500 * MS2US;
-    snprintf(param.name, sizeof(param.name), "%s-%d", parent_name, wid);
-    d = tasvir_new(param);
-    if (!d)
+    param.len = sizeof(T) * capacity + sizeof(Array<T>);
+    param.sync_int_us = sync_int_us;
+    param.sync_ext_us = sync_ext_us;
+    snprintf(param.name, sizeof(param.name), "%s-%lu", array_name, rank);
+    if (!(d = tasvir_new(param)))
         return NULL;
 
-    worker = reinterpret_cast<Array<T>*>(tasvir_data(d));
-    tasvir_log(worker, sizeof(*worker));
-    worker->_size = nr_elements;
-    worker->_nr_workers = 0;
-    worker->_wid = wid;
-    worker->_version = 1;
-    worker->_version_done = 0;
+    me = reinterpret_cast<Array<T>*>(tasvir_data(d));
+    tasvir_log(me, sizeof(*me));
+    me->size_ = size;
+    me->capacity_ = capacity;
+    me->nr_ranks_ = nr_ranks;
+    me->nr_nodes_ = nr_nodes;
+    me->rank_ = rank;
+    me->bcnt_ = 2;
 
-    if (wid == 0) {
-        parent = reinterpret_cast<Array<T>*>(tasvir_data(d));
-        for (std::size_t i = 0; i < nr_workers; i++) {
-            snprintf(name, sizeof(name), "%s-%d", name, i);
-            d = tasvir_attach_wait(5 * S2US, name);
-            if (!d)
-                return NULL;
-            parent->_workers[i] = reinterpret_cast<Array<T>*>(tasvir_data(d));
-            while (!parent->_workers[i] || parent->_workers[i]->_initialized != 0xdeadbeef)
-                tasvir_service_wait(S2US, false);
-        }
-        parent->_initialized = 0xdeadbeef;
-        tasvir_log(parent, sizeof(*parent));
-        tasvir_service_wait(5 * S2US, true);
-    } else {
-        worker->_initialized = 0xdeadbeef;
-        tasvir_service_wait(5 * S2US, true);
-        snprintf(name, sizeof(name), "%s-0", name);
-        // TODO: add option to attach to RW copy
-        d = tasvir_attach_wait(5 * S2US, name);
-        if (!d)
+    uint32_t nr_local_ranks = (nr_ranks + nr_nodes - 1) / nr_nodes;
+    uint32_t local_rank_b = rank / nr_local_ranks;
+    uint32_t local_rank_e = rank;
+    // TODO: add option to attach to RW copy
+    for (uint32_t r = 0; r < nr_ranks; r++) {
+        snprintf(name, sizeof(name), "%s-%lu", array_name, r);
+        if (!(d = tasvir_attach_wait(5 * S2US, name)))
             return NULL;
-        parent = reinterpret_cast<Array<T>*>(tasvir_data(d));
-        while (parent->_initialized != 0xdeadbeef)
-            tasvir_service_wait(S2US, false);
+        me->ranks_[r] = reinterpret_cast<Array<T>*>(tasvir_data(d));
     }
 
-    tasvir_log(worker, sizeof(*worker));
-    worker->_parent = parent;
-    worker->_nr_workers = parent->_nr_workers;
-    std::copy(parent->_workers, parent->_workers + nr_workers, worker->_workers);
-    worker->Barrier();
+    tasvir_log(me, sizeof(*me));
+    me->Barrier();
 
-    return worker;
+    return me;
 }
 
 }  // namespace tasvir

@@ -14,11 +14,9 @@ void tasvir_hexdump(void *addr, size_t len) {
 void tasvir_area_str(const tasvir_area_desc *d, char *buf, size_t buf_size) {
     static const char *tasvir_area_type_str[] = {"invalid", "container", "node", "app"};
 
-    snprintf(
-        buf, buf_size,
-        "name=%s type=%s len=0x%lx sync_us=%lu/%lu boot_us=%lu nr_areas_max=%lu d=%p pd=%p owner=%p h=%p flags=0x%lx",
-        d->name, tasvir_area_type_str[d->type], d->len, d->sync_int_us, d->sync_ext_us, d->boot_us, d->nr_areas_max,
-        (void *)d, (void *)d->pd, (void *)d->owner, (void *)d->h, d->h ? d->h->flags_ : 0);
+    snprintf(buf, buf_size, "name=%s type=%s len=0x%lx sync_us=%lu/%lu d=%p pd=%p owner=%p h=%p flags=0x%lx", d->name,
+             tasvir_area_type_str[d->type], d->len, d->sync_int_us, d->sync_ext_us, (void *)d, (void *)d->pd,
+             (void *)d->owner, (void *)d->h, d->h ? d->h->flags_ : 0);
 }
 
 void tasvir_msg_str(tasvir_msg *m, bool is_src_me, bool is_dst_me, char *buf, size_t buf_size) {
@@ -52,9 +50,7 @@ void tasvir_msg_str(tasvir_msg *m, bool is_src_me, bool is_dst_me, char *buf, si
 #endif
 }
 
-void tasvir_nid_str(const tasvir_nid *nid, char *buf, size_t buf_size __attribute__((unused))) {
-    ether_ntoa_r(&nid->mac_addr, buf);
-}
+void tasvir_nid_str(const tasvir_nid *nid, char *buf, UNUSED size_t buf_size) { ether_ntoa_r(&nid->mac_addr, buf); }
 
 void tasvir_tid_str(const tasvir_tid *tid, char *buf, size_t buf_size) {
     tasvir_nid_str(&tid->nid, buf, buf_size);

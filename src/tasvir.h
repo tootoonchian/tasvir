@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <immintrin.h>
 #include <inttypes.h>
+#include <jemalloc/jemalloc.h>
 #include <net/ethernet.h>
 #include <rte_cycles.h>
 #include <rte_mbuf.h>
@@ -66,6 +67,7 @@ typedef enum {
     TASVIR_AREA_FLAG_EXT_PENDING = 1 << 4, /* incoming external sync ongoing */
     TASVIR_AREA_FLAG_EXT_IGNORE = 1 << 5,  /* incoming external sync to be ignored */
     TASVIR_AREA_FLAG_EXT_ENQUEUE = 1 << 6, /* incoming external sync to be queued */
+    TASVIR_AREA_FLAG_DYNAMIC = 1 << 7,     /* dynamic space allocation */
 } tasvir_area_cache_flag;
 
 typedef enum {
@@ -101,7 +103,7 @@ struct __attribute__((__packed__)) tasvir_msg_rpc {
     tasvir_msg h;
     uint32_t fid;
     uint8_t pad_[4];
-    uint8_t data[1];  // __attribute__((aligned(sizeof(tasvir_arg_promo_t)))); /* for compatibility */
+    uint8_t data[1];
 };
 
 TASVIR_STATIC_ASSERT(offsetof(tasvir_msg_rpc, data) % sizeof(tasvir_arg_promo_t) == 0,
@@ -140,6 +142,7 @@ typedef enum {
 /* set prior to sync by daemon and concurrently updated by all during sync */
 struct __attribute__((aligned(TASVIR_CACHELINE_BYTES))) tasvir_sync_job {
     tasvir_area_desc *d;
+    tasvir_thread *owner;
     bool self_sync;
     bool done_stage1;  // walking the log
     bool done_stage2;  // updating the header
@@ -209,19 +212,26 @@ struct __attribute__((aligned(TASVIR_CACHELINE_BYTES))) tasvir_local_ndata { /* 
     size_t nr_jobs;
     tasvir_sync_job jobs[TASVIR_NR_SYNC_JOBS];
 
-    /* thread to daemon requests */
+    /* request flags */
     bool node_init_req;
     bool sync_req;
     bool stat_reset_req;
     bool stat_update_req;
 
+    /* other flags */
+    bool is_root;
+
     /* thread data */
     tasvir_local_tdata tdata[TASVIR_NR_THREADS_LOCAL];
 };
 
+typedef struct tasvir_extent_hooks_t {
+    extent_hooks_t hooks;
+    tasvir_area_desc *d;
+} tasvir_extent_hooks_t;
+
 /* thread-internal data */
 struct __attribute__((aligned(4096))) tasvir_tls_data {
-    double tsc2usec_mult;
     tasvir_area_desc *root_desc; /* root area descriptor */
     tasvir_area_desc *node_desc; /* current node's area descriptor */
     tasvir_node *node;           /* current node's global data */
@@ -229,6 +239,7 @@ struct __attribute__((aligned(4096))) tasvir_tls_data {
     tasvir_local_ndata *ndata;   /* current node's node-local data */
     tasvir_local_tdata *tdata;   /* current thread's node-local data */
 
+    double tsc2usec_mult;
     uint16_t nr_msgs;
     int fd;
     int nr_fns;
@@ -237,14 +248,19 @@ struct __attribute__((aligned(4096))) tasvir_tls_data {
     tasvir_fn_desc *ht_fnptr;
     tasvir_rpc_status status_l[TASVIR_NR_RPC_MSG];
 
-    bool is_root;
+    int nr_extent_hooks;
+    tasvir_extent_hooks_t extent_hooks[TASVIR_NR_AREAS];
 } ttld; /* tasvir thread-local data */
-
 
 _Static_assert(sizeof(tasvir_local_ndata) <= TASVIR_SIZE_LOCAL,
                "TASVIR_SIZE_LOCAL smaller than sizeof(tasvir_local_ndata)");
 
 /* function prototypes */
+
+void *tasvir_extent_alloc_hook(extent_hooks_t *, void *, size_t, size_t, bool *, bool *, unsigned);
+bool tasvir_extent_dalloc_hook(extent_hooks_t *, void *, size_t, bool, unsigned);
+bool tasvir_extent_merge_hook(extent_hooks_t *, void *, size_t, void *, size_t, bool, unsigned);
+bool tasvir_extent_split_hook(extent_hooks_t *, void *, size_t, size_t, size_t, bool, unsigned);
 
 tasvir_area_desc *tasvir_new_alloc_desc(tasvir_area_desc);
 int tasvir_area_add_user(tasvir_area_desc *, tasvir_node *, int);

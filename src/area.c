@@ -18,10 +18,9 @@ tasvir_area_desc *tasvir_area_get_by_name(tasvir_area_desc *pd, const char *name
         if (name[0] == '/')
             d = ttld.root_desc;
     } else if (pd->type == TASVIR_AREA_TYPE_CONTAINER && pd->h && pd->h->d) {
-        tasvir_area_desc *c = tasvir_data(pd);
         for (size_t i = 0; i < pd->h->nr_areas; i++) {
-            if (strncmp(c[i].name, name, sizeof(tasvir_str)) == 0) {
-                d = &c[i];
+            if (strncmp(pd->h->child[i].name, name, sizeof(tasvir_str)) == 0) {
+                d = &pd->h->child[i];
                 break;
             }
         }
@@ -75,7 +74,7 @@ bool tasvir_area_is_owner(const tasvir_area_desc *d, tasvir_thread *t) {
 #ifdef TASVIR_DAEMON
     if (tasvir_is_booting()) {
         if (d == ttld.root_desc)
-            return ttld.is_root;
+            return ttld.ndata->is_root;
         else if (d == ttld.node_desc)
             return true;
     }
@@ -97,19 +96,18 @@ size_t tasvir_area_walk(tasvir_area_desc *d, tasvir_fnptr_walkcb fnptr) {
     size_t retval = 0;
     retval += fnptr(d);
     if (d->type == TASVIR_AREA_TYPE_CONTAINER) {
-        tasvir_area_desc *c = tasvir_data(d);
         for (size_t i = 0; i < d->h->nr_areas; i++) {
-            retval += tasvir_area_walk(&c[i], fnptr);
+            retval += tasvir_area_walk(&d->h->child[i], fnptr);
         }
     }
     return retval;
 }
 #endif
 
-static inline void tasvir_update_va(const tasvir_area_desc *d, bool is_rw) {
+void tasvir_update_va(const tasvir_area_desc *d, bool is_rw) {
     if (tasvir_area_is_mapped_rw(d) == is_rw)
         return;
-    size_t len = d->offset_log_end;
+    size_t len = d->len_logged;
     size_t offset = (uintptr_t)d->h - TASVIR_ADDR_BASE + is_rw * TASVIR_SIZE_DATA;
     void *ret = mmap(d->h, len, PROT_READ | PROT_WRITE, MAP_NORESERVE | MAP_SHARED | MAP_FIXED, ttld.fd, offset);
     if (ret != d->h) {
@@ -133,35 +131,37 @@ tasvir_area_desc *tasvir_new_alloc_desc(tasvir_area_desc desc) {
     }
 
     /* allocate descriptor and header */
-    if (!desc.pd) { /* root area */
+    if (!strcmp(desc.name, "/")) { /* root area */
         d = ttld.root_desc;
         h = ttld.root_desc->h;
     } else {
-        tasvir_area_desc *c = tasvir_data(desc.pd);
-
+        /* ensure area does not exist */
+        for (size_t i = 0; i < desc.pd->h->nr_areas; i++) {
+            if (!strncmp(desc.pd->h->child[i].name, desc.name, sizeof(tasvir_str))) {
+                d = &desc.pd->h->child[i];
+                h = d->h;
+                if (d->owner != desc.owner) {
+                    LOG_ERR("area %s already exists", desc.name);
+                    return NULL;
+                }
+            }
+        }
+    }
+    if (!d) {
         /* ensure enough descriptors */
-        if (desc.pd->h->nr_areas >= desc.pd->nr_areas_max) {
+        size_t *nr_areas = &desc.pd->h->nr_areas;
+        if (*nr_areas >= TASVIR_NR_AREAS) {
             LOG_ERR("out of descriptors");
             return NULL;
         }
-
-        /* ensure area does not exist */
-        for (size_t i = 0; i < desc.pd->h->nr_areas; i++) {
-            if (strncmp(c[i].name, desc.name, sizeof(tasvir_str)) == 0) {
-                LOG_ERR("area %s already exists", desc.name);
-                return NULL;
-            }
-        }
-
-        size_t *nr_areas = &desc.pd->h->nr_areas;
-        d = &c[*nr_areas];
-        h = (void *)TASVIR_ALIGN((*nr_areas > 0 ? (uint8_t *)c[*nr_areas - 1].h + c[*nr_areas - 1].len
-                                                : (uint8_t *)c + desc.pd->nr_areas_max * sizeof(tasvir_area_desc)));
+        d = &desc.pd->h->child[*nr_areas];
+        h = (void *)TASVIR_ALIGN(
+            (*nr_areas ? (uint8_t *)desc.pd->h->child[*nr_areas - 1].h + desc.pd->h->child[*nr_areas - 1].len
+                       : (uint8_t *)&desc.pd->h->child[TASVIR_NR_AREAS]));
         if ((uint8_t *)h + desc.len >= (uint8_t *)desc.pd->h->diff_log[0].data) {
             LOG_ERR("d=%s out of space", desc.pd->name);
             return NULL;
         }
-
         tasvir_log(nr_areas, sizeof(desc.pd->h->nr_areas));
         (*nr_areas)++;
     }
@@ -170,12 +170,9 @@ tasvir_area_desc *tasvir_new_alloc_desc(tasvir_area_desc desc) {
     desc.h = h;
     if (ttld.node_desc && desc.type == TASVIR_AREA_TYPE_NODE)
         desc.sync_ext_us = ttld.node_desc->sync_ext_us;
-    desc.boot_us = tasvir_time_us();
     memcpy(d, &desc, sizeof(tasvir_area_desc));
-    if (d == ttld.root_desc)  // FIXME: hack for the orphan root
-        memcpy(tasvir_data2rw(d), &desc, sizeof(tasvir_area_desc));
 
-    LOG_DBG("d=%s", d->name);
+    LOG_DBG("d=%s addr=%p", d->name, (void *)d);
     return d;
 }
 
@@ -195,14 +192,15 @@ tasvir_area_desc *tasvir_new(tasvir_area_desc desc) {
         return NULL;
     }
 #endif
-    if (!desc.pd && ttld.node)
+    if (!desc.pd)
         desc.pd = ttld.root_desc;
 
     /* calculate space requirements */
-    size_t size_metadata = sizeof(tasvir_area_header) + desc.nr_areas_max * sizeof(tasvir_area_desc);
-    desc.offset_log_end = TASVIR_ALIGN(size_metadata + (desc.type == TASVIR_AREA_TYPE_CONTAINER ? 0 : desc.len));
+    bool is_container = desc.type == TASVIR_AREA_TYPE_CONTAINER;
+    size_t size_metadata = offsetof(tasvir_area_header, child[is_container * TASVIR_NR_AREAS]);
+    desc.len_logged = TASVIR_ALIGN(size_metadata + !is_container * desc.len);
     size_t offset_log = TASVIR_ALIGN(size_metadata + desc.len);
-    size_t size_log = TASVIR_ALIGNX(desc.offset_log_end >> TASVIR_SHIFT_BYTE, sizeof(tasvir_log_t));
+    size_t size_log = TASVIR_ALIGNX(desc.len_logged >> TASVIR_SHIFT_BYTE, sizeof(tasvir_log_t));
     desc.len = offset_log + TASVIR_ALIGN(TASVIR_NR_AREA_LOGS * size_log);
 
     /* allocate descriptor: may be a local or a remote request */
@@ -237,22 +235,25 @@ tasvir_area_desc *tasvir_new(tasvir_area_desc desc) {
 
     tasvir_update_owner(d, desc.owner);
     tasvir_area_header *h = d->h;
-    /* exclude h->flags_ from log since it is local */
+    /* exclude the private part of header from log/sync since it is local */
     tasvir_log(&h->d, sizeof(tasvir_area_header) - offsetof(tasvir_area_header, d));
+
+    h->len_dalloc = size_metadata;
+
     h->flags_ |= TASVIR_AREA_FLAG_ACTIVE;
     h->last_sync_ext_us_ = 0;
+    h->arena_ind_ = -1;
     h->d = d;
     h->version = 1;
     h->time_us = tasvir_time_us();
     h->nr_areas = 0;
     h->nr_users = 0;
     for (size_t i = 0; i < TASVIR_NR_AREA_LOGS; i++) {
-        tasvir_area_log *log = &h->diff_log[i];
-        log->version_start = 0;
-        log->version_end = 0;
-        log->start_us = h->time_us;
-        log->end_us = 0;
-        log->data = (tasvir_log_t *)((uint8_t *)h + offset_log + i * size_log);
+        h->diff_log[i].version_start = 0;
+        h->diff_log[i].version_end = 0;
+        h->diff_log[i].start_us = h->time_us;
+        h->diff_log[i].end_us = 0;
+        h->diff_log[i].data = (tasvir_log_t *)((uint8_t *)h + offset_log + i * size_log);
     }
     if (ttld.node && tasvir_area_add_user(d, ttld.node, -1)) {
         LOG_ERR("failed to add local node as a subscriber of d=%s", d->name);
@@ -400,18 +401,22 @@ tasvir_area_desc *tasvir_attach(const char *name) {
         tok = "/";
     }
 
+    bool is_attached = false;
     do {
         d = tasvir_area_get_by_name(pd, tok);
         if (!d) /* invalid descriptor */
             return NULL;
-        if (tasvir_area_add_user(d, ttld.node, -1))
+        is_attached = tasvir_area_is_attached(d, ttld.node);
+        if (!is_attached && tasvir_area_add_user(d, ttld.node, -1))
             return NULL;
         pd = d;
     } while ((tok = strtok(NULL, "/")));
 
-    char area_str[256];
-    tasvir_area_str(d, area_str, sizeof(area_str));
-    LOG_INFO("%s", area_str);
+    if (!is_attached) {
+        char area_str[256];
+        tasvir_area_str(d, area_str, sizeof(area_str));
+        LOG_INFO("%s", area_str);
+    }
     return d;
 }
 
@@ -438,53 +443,76 @@ int tasvir_detach(tasvir_area_desc *d) {
 }
 
 int tasvir_update_owner(tasvir_area_desc *d, tasvir_thread *owner) {
+    // FIXME: serialize request for ownership
+    // on old owner: stop writing
+    // on parent: change owner
+    // on new owner: wait for old owner version
+    // on old owner crash: wait for latest version
+
     assert(d && ttld.thread && owner);
-    bool is_new_owner;
-    bool is_old_owner;
-    bool is_parent_owner;
-
-    if (tasvir_is_booting()) {
-        assert(d == ttld.root_desc || ttld.node_desc);
-        is_new_owner = is_old_owner = true;
-        is_parent_owner = ttld.is_root;
-    } else {
-        is_new_owner = ttld.thread == owner;
-        is_old_owner = ttld.thread == d->owner;
-        is_parent_owner = ttld.thread == (d->pd ? d->pd->owner : d->owner);
-    }
-
-    tasvir_area_header *h_rw = tasvir_data2rw(d->h);
-    tasvir_area_header *h_ro = tasvir_data2ro(d->h);
-    if (is_new_owner) {
-        tasvir_update_va(d, true);
-        h_rw->flags_ |= TASVIR_AREA_FLAG_LOCAL;
-        h_ro->flags_ |= TASVIR_AREA_FLAG_LOCAL;
-
-        if (!is_old_owner) {
-            tasvir_rpc_status *s = tasvir_rpc(d, (tasvir_fnptr)&tasvir_update_owner, d, owner);
-            s->do_free = true;
-        } else if (d->owner != owner && !is_parent_owner) {
-            tasvir_rpc_status *s = tasvir_rpc(d->pd, (tasvir_fnptr)&tasvir_update_owner, d, owner);
-            s->do_free = true;
-        }
-    } else if (is_old_owner) {
-        tasvir_update_va(d, false);
-        if (memcmp(&owner->tid.nid, &d->owner->tid.nid, sizeof(tasvir_nid))) {
-            h_rw->flags_ &= ~TASVIR_AREA_FLAG_LOCAL;
-            h_ro->flags_ &= ~TASVIR_AREA_FLAG_LOCAL;
-        }
-    }
+    bool is_parent_owner = ttld.thread == d->pd->owner
+#ifdef TASVIR_DAEMON
+                           || (tasvir_is_booting() && ttld.ndata->is_root)
+#endif
+        ;
 
     if (is_parent_owner) {
         tasvir_log(&d->owner, sizeof(d->owner));
         d->owner = owner;
+    } else if (d->owner != owner) {
+        tasvir_rpc_wait(500 * MS2US, NULL, d->pd, (tasvir_fnptr)&tasvir_update_owner, d, owner);
     }
 
-    uint64_t end_tsc = __rdtsc() + tasvir_usec2tsc(100 * MS2US);
-    while (__rdtsc() < end_tsc && d->owner != owner) {
-        tasvir_service();
-        rte_delay_us(1);
+    if (ttld.thread == owner && d->owner == owner) {
+        tasvir_area_header *h_rw = tasvir_data2rw(d->h);
+        tasvir_area_header *h_ro = tasvir_data2ro(d->h);
+        h_rw->flags_ |= TASVIR_AREA_FLAG_LOCAL;
+        h_ro->flags_ |= TASVIR_AREA_FLAG_LOCAL;
+        tasvir_update_va(d, true);
     }
 
     return d->owner == owner ? 0 : -1;
+}
+
+int tasvir_area_enable_dynamic_allocation(tasvir_area_desc *d, bool replace_malloc, bool disable_tcache) {
+    d->h->flags_ |= TASVIR_AREA_FLAG_DYNAMIC;
+    tasvir_extent_hooks_t *hooks = (tasvir_extent_hooks_t *)d->h->extent_hooks_;
+    if (!d->h->extent_hooks_) {
+        hooks = &ttld.extent_hooks[ttld.nr_extent_hooks++];
+        memset(hooks, 0, sizeof(tasvir_extent_hooks_t));
+        hooks->hooks.alloc = &tasvir_extent_alloc_hook;
+        // hooks->hooks.dalloc = &tasvir_extent_dalloc_hook;
+        hooks->hooks.merge = &tasvir_extent_merge_hook;
+        hooks->hooks.split = &tasvir_extent_split_hook;
+        hooks->d = d;
+        d->h->extent_hooks_ = hooks;
+        /* create a jemalloc arena with custom extent hooks */
+        int rc;
+        size_t sz = sizeof(unsigned);
+        if ((rc = mallctl("arenas.create", (void *)&d->h->arena_ind_, &sz, (void *)&hooks,
+                          sizeof(tasvir_extent_hooks_t *)))) {
+            LOG_ERR("failed to create jemalloc arena backed by d=%s rc=%d", d->name, rc);
+            return -1;
+        }
+    }
+
+    /* change the default arena for the calling thread */
+    unsigned arena_ind = replace_malloc ? d->h->arena_ind_ : 0;
+    if (mallctl("thread.arena", NULL, NULL, (void *)&arena_ind, sizeof(unsigned))) {
+        LOG_ERR("jemalloc thread.arena failed");
+        return -1;
+    }
+    if (mallctl("thread.tcache.flush", NULL, NULL, NULL, 0)) {
+        LOG_ERR("jemalloc thread.tcache.flush failed");
+        return -1;
+    }
+
+    /* disable tcache when taking over malloc to ensure all allocations are served from the arena */
+    bool enable_tcache = !disable_tcache;
+    if (mallctl("thread.tcache.enabled", NULL, NULL, (void *)&enable_tcache, sizeof(bool))) {
+        LOG_ERR("jemalloc thread.tcache.enabled %s failed", enable_tcache ? "set" : "unset");
+        return -1;
+    }
+
+    return 0;
 }

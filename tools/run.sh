@@ -178,8 +178,11 @@ generate_cmd() {
             local pciaddr=${HOST_NIC[$host]}
             local cmd_daemon
             local is_root=$(expr "$wid" = 0)
+            cmd_env=""
             core=$((HOST_NCORES[$host] - 1))
-            cmd_daemon="/usr/bin/env TASVIR_IS_ROOT=$is_root TASVIR_CORE=%CORE% TASVIR_PCIADDR=$pciaddr $TASVIR_BINDIR/tasvir_daemon"
+            cmd_daemon="/usr/bin/env TASVIR_IS_ROOT=$is_root TASVIR_CORE=%CORE% "
+            [[ -z "$SKIP_NET" ]] && cmd_daemon+="TASVIR_PCIADDR=$pciaddr "
+            cmd_daemon+="$TASVIR_BINDIR/tasvir_daemon"
             local wid2=$wid
             wid=d
             cmd_ssh=$([ "$HOSTNAME" != "$host" ] && echo "ssh -o LogLevel=QUIET -tt $host")

@@ -1,4 +1,4 @@
-# Tasvir: A Versioned Shared Memory Interface
+# Tasvir: A Versioned Shared-Memory Interface
 Tasvir consists of a library and daemon which provides programs a raw, versioned, publish-subscribe shared-memory interface over the network.
 Tasvir-allocated areas are versioned, atomically updated, and single-writer.
 

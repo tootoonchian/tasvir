@@ -249,7 +249,7 @@ static __attribute__((noinline)) uint64_t experiment(BenchmarkConfig &__restrict
     Vec *__restrict data_i = (Vec *)TASVIR_ALIGNX(tasvir_data(cfg.d), 4096);
     uint64_t offset_i[8];
     Vec src_v = avx512_xorshift128plus(&rndkey);
-    if ((uintptr_t)data_i + cfg.area_len > (uintptr_t)tasvir_data(cfg.d) + cfg.d->offset_log_end) {
+    if ((uintptr_t)data_i + cfg.area_len > (uintptr_t)tasvir_data(cfg.d) + cfg.d->len_logged) {
         fprintf(stderr, "insufficient space allocated. aborting...");
         return 0;
     }

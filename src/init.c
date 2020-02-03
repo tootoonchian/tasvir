@@ -43,12 +43,15 @@ static int tasvir_init_local() {
     ttld.tdata = &ttld.ndata->tdata[TASVIR_THREAD_DAEMON_IDX];
 
 #ifdef TASVIR_DAEMON
+    memset(ttld.ndata, 0, sizeof(tasvir_local_ndata));
     char *is_root = getenv("TASVIR_IS_ROOT");
     if (is_root && strcmp(is_root, "1") == 0) {
         LOG_INFO("claiming the root area ownership (TASVIR_IS_ROOT is set)")
-        ttld.is_root = 1;
+        ttld.ndata->is_root = 1;
+    } else if (!getenv("TASVIR_PCIADDR")) {
+        LOG_INFO("claiming the root area ownership (TASVIR_PCIADDR is not set)");
+        ttld.ndata->is_root = 1;
     }
-    memset(ttld.ndata, 0, sizeof(tasvir_local_ndata));
 
     /* boot mutex */
     pthread_mutexattr_t mutex_attr;
@@ -117,6 +120,7 @@ static int tasvir_init_local() {
     }
 #endif
     ttld.tsc2usec_mult = ttld.ndata->tsc2usec_mult;
+    ttld.nr_extent_hooks = 0;
 
     return 0;
 }
@@ -129,19 +133,18 @@ static int tasvir_init_root() {
     ttld.root_desc->pd = NULL;
     ttld.root_desc->owner = NULL;
     ttld.root_desc->h = (void *)TASVIR_ALIGN((uintptr_t)ttld.root_desc + sizeof(tasvir_area_desc));
-    ttld.root_desc->offset_log_end =
-        TASVIR_ALIGN(sizeof(tasvir_area_header) + TASVIR_NR_AREAS * sizeof(tasvir_area_desc));
+    ttld.root_desc->len_logged = TASVIR_ALIGN(sizeof(tasvir_area_header) + TASVIR_NR_AREAS * sizeof(tasvir_area_desc));
     ttld.root_desc->type = TASVIR_AREA_TYPE_CONTAINER;
     strcpy(ttld.root_desc->name, "/");
     ttld.root_desc->len = TASVIR_SIZE_DATA - GB;
-    ttld.root_desc->nr_areas_max = TASVIR_NR_AREAS;
-#endif
-    if (ttld.is_root) {
+    if (ttld.ndata->is_root) {
         d_ret = tasvir_new(*ttld.root_desc);
     } else {
         d_ret = tasvir_attach_wait(15 * S2US, "/");
     }
-
+#else
+    d_ret = tasvir_attach_wait(15 * S2US, "/");
+#endif
     if (!d_ret || !d_ret->h) {
         LOG_ERR("root not initialized");
         return -1;
@@ -160,12 +163,8 @@ static int tasvir_init_node() {
 
 #ifdef TASVIR_DAEMON
     /* id and address */
-    /* initializing boot_us so that could later use this node's clock rather than root's */
-    ttld.node_desc = tasvir_new((tasvir_area_desc){.pd = ttld.root_desc,
-                                                   .type = TASVIR_AREA_TYPE_NODE,
-                                                   .name0 = *(tasvir_str_static *)name,
-                                                   .len = sizeof(tasvir_node),
-                                                   .nr_areas_max = 0});
+    ttld.node_desc = tasvir_new((tasvir_area_desc){
+        .type = TASVIR_AREA_TYPE_NODE, .name0 = *(tasvir_str_static *)name, .len = sizeof(tasvir_node)});
     if (!ttld.node_desc) {
         LOG_ERR("failed to allocate node");
         return -1;
@@ -178,7 +177,7 @@ static int tasvir_init_node() {
     /* time */
     tasvir_log(ttld.node, sizeof(tasvir_node));
 #else
-    ttld.node_desc = tasvir_attach_wait(500 * MS2US, name);
+    ttld.node_desc = tasvir_attach_wait(S2US, name);
     if (!ttld.node_desc || !ttld.node_desc->h->d) {
         LOG_ERR("node not initiliazed yet");
         return -1;
@@ -202,7 +201,6 @@ static int tasvir_init_node() {
 
 tasvir_thread *tasvir_init_thread(pid_t pid) {
     tasvir_thread *t = NULL;
-    tasvir_str tid_str;
 
 #ifdef TASVIR_DAEMON
     /* find a free thread id */
@@ -231,14 +229,13 @@ tasvir_thread *tasvir_init_thread(pid_t pid) {
 
     /* rings */
     tasvir_str tmp;
-    sprintf(tmp, "tasvir_tx_%d", idx);
+    sprintf(tmp, "tasvir_tx_%02x", idx);
     tdata->ring_tx = rte_ring_create(tmp, TASVIR_RING_SIZE, rte_socket_id(), RING_F_SP_ENQ | RING_F_SC_DEQ);
-    sprintf(tmp, "tasvir_rx_%d", idx);
+    sprintf(tmp, "tasvir_rx_%02x", idx);
     tdata->ring_rx = rte_ring_create(tmp, TASVIR_RING_SIZE, rte_socket_id(), RING_F_SP_ENQ | RING_F_SC_DEQ);
 
     if (!tdata->ring_tx || !tdata->ring_rx) {
-        tasvir_tid_str(&t->tid, tid_str, sizeof(tid_str));
-        LOG_ERR("failed to create rings for tid %s", tid_str);
+        LOG_ERR("failed to create rings for tid idx=%d pid=%d", idx, pid);
         return NULL;
     }
 #else
@@ -249,17 +246,19 @@ tasvir_thread *tasvir_init_thread(pid_t pid) {
     if (rc)
         return NULL;
     tasvir_local_tdata *tdata = &ttld.ndata->tdata[t->tid.idx];
+    ttld.tdata = tdata;
 #endif
 
+    tasvir_str tid_str;
     tasvir_tid_str(&t->tid, tid_str, sizeof(tid_str));
-    LOG_INFO("addr=%p tx_ring=%p rx_ring=%p tid=%s", (void *)t, (void *)tdata->ring_tx, (void *)tdata->ring_rx,
-             tid_str);
+    LOG_INFO("tid=%s addr=%p tx_ring=%p rx_ring=%p", tid_str, (void *)t, (void *)tdata->ring_tx,
+             (void *)tdata->ring_rx);
     return t;
 }
 
 int tasvir_init_finish(tasvir_thread *t) {
     tasvir_local_tdata *tdata = &ttld.ndata->tdata[t->tid.idx];
-    if (tdata->state != TASVIR_THREAD_STATE_BOOTING) {
+    if (tdata->state != TASVIR_THREAD_STATE_BOOTING && tdata->state != TASVIR_THREAD_STATE_RUNNING) {
         LOG_ERR("calling thread is not in the BOOTING state");
         return -1;
     }
@@ -268,7 +267,7 @@ int tasvir_init_finish(tasvir_thread *t) {
 #ifdef TASVIR_DAEMON
     /* backfill area owners */
     if (t == ttld.thread) {
-        if (ttld.is_root) {
+        if (ttld.ndata->is_root) {
             if (tasvir_update_owner(ttld.root_desc, ttld.thread)) {
                 LOG_ERR("failed to update the root area owner");
                 return -1;
@@ -298,26 +297,21 @@ int tasvir_init_finish(tasvir_thread *t) {
     }
 #endif
 
-    if (t == ttld.thread) {
-        if (!tasvir_is_running()) {
-            LOG_ERR("thread is not in the RUNNING state");
-            return -1;
-        }
+    if (t == ttld.thread && !tasvir_is_running()) {
+        LOG_ERR("thread is not in the RUNNING state");
+        return -1;
     }
 
     char tid_str[48];
     tasvir_tid_str(&t->tid, tid_str, sizeof(tid_str));
     LOG_INFO("tid=%s addr=%p", tid_str, (void *)t);
 
-#ifdef TASVIR_DAEMON
-    tasvir_sync_external_area(ttld.node_desc);
-#endif
     return 0;
 }
 
+// __attribute__((constructor))
 tasvir_area_desc *tasvir_init() {
     if (ttld.node || ttld.thread) {
-        LOG_ERR("already initialized");
         return ttld.root_desc;
     }
     /* ttld has static storage and is automatically zero-initialized */
@@ -356,7 +350,6 @@ tasvir_area_desc *tasvir_init() {
         LOG_ERR("tasvir_init_thread failed");
         return NULL;
     }
-    ttld.tdata = &ttld.ndata->tdata[ttld.thread->tid.idx];
 
     if (tasvir_init_finish(ttld.thread)) {
         LOG_ERR("tasvir_init_finish failed");

@@ -78,13 +78,12 @@ static void tasvir_service_io() {
                 tasvir_service_ring(ttld.ndata->tdata[tid].ring_tx, true);
     }
 
-#ifndef TASVIR_SYNC_EXT_SKIP
     /* physical port */
-    if (!ttld.is_root || tasvir_is_running()) {  // no I/O during root's boot
+    if (ttld.ndata->port_id != (uint16_t)-1 &&
+        (!ttld.ndata->is_root || tasvir_is_running())) {  // no I/O during root's boot
         tasvir_service_port_rx();
         tasvir_service_port_tx();
     }
-#endif
 #else
     tasvir_service_ring(ttld.tdata->ring_rx, true);
 #endif
@@ -97,14 +96,15 @@ void tasvir_service_nodes() {
 
     v_prev = ttld.root_desc->h->version;
     /* attach to new node areas */
-    tasvir_area_desc *c = tasvir_data(ttld.root_desc);
-    size_t nr_areas = ttld.root_desc->h->nr_areas;
-    for (size_t i = 0; --nr_areas > 0 && i < ttld.root_desc->nr_areas_max; i++)
-        if (c[i].type == TASVIR_AREA_TYPE_NODE)
-            tasvir_attach_wait(100 * MS2US, c[i].name);
+    for (size_t i = 0; i < ttld.root_desc->h->nr_areas; i++)
+        if (ttld.root_desc->h->child[i].type == TASVIR_AREA_TYPE_NODE)
+            tasvir_attach_wait(100 * MS2US, ttld.root_desc->h->child[i].name);
 }
 
 int tasvir_service() {
+    if (!ttld.tdata)
+        return -1;
+
     /* upadte check-in time */
     ttld.tdata->time_us = tasvir_time_us();  // FIXME: assuming invariant tsc
 
@@ -129,26 +129,25 @@ int tasvir_service() {
         tasvir_sched_sync_internal();
 #endif
 
+    int retval = -1;
     if (ttld.tdata->next_sync_seq != ttld.tdata->prev_sync_seq) {
-        int retval = tasvir_sync_internal();
+        retval = tasvir_sync_internal();
 #ifdef TASVIR_DAEMON
         if (!retval) /* process pending memory updates */
             tasvir_service_ring(ttld.ndata->ring_mem_pending, false);
 #endif
-        return retval;
     }
 
 #ifdef TASVIR_DAEMON
-#ifndef TASVIR_SYNC_EXT_SKIP
-    if (ttld.ndata->time_us - ttld.ndata->last_sync_ext_end >= ttld.ndata->sync_ext_us)
+    if (ttld.ndata->port_id != (uint16_t)-1 &&
+        ttld.ndata->time_us - ttld.ndata->last_sync_ext_end >= ttld.ndata->sync_ext_us)
         tasvir_sync_external();
-#endif
 
     if (ttld.ndata->stat_update_req || (ttld.ndata->time_us - ttld.ndata->last_stat >= TASVIR_STAT_US))
         tasvir_stats_update();
 #endif
 
-    return -1;
+    return retval;
 }
 
 int tasvir_service_wait(uint64_t timeout_us, bool sync_req) {

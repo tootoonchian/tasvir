@@ -38,33 +38,6 @@ void tasvir_stats_update() {
     struct rte_eth_stats s;
     rte_eth_stats_get(0, &s);
 
-    LOG_INFO(
-        "isync_cnt=+%lu/s,-%lu/s isync_t=%.1f%%,%luus/call "
-        "isync_changed=%luKB/s,%luKB/call isync_processed=%luKB/s,%luKB/call"
-        "\n                                        "
-        "esync_cnt=%lu/s esync_t=%.1f%%,%luus/call "
-        "esync_changed=%luKB/s,%luKB/call esync_processed=%luKB/s,%luKB/call"
-        "\n                                        "
-        "rx=%luKB/s,%luKpps tx=%luKB/s,%luKpps "
-        "(ipkts=%lu ibytes=%lu ierr=%lu imiss=%lu inombuf=%lu"
-        ",opkts=%lu obytes=%lu oerr=%lu)",
-        S2US * cur->isync_success / interval_us, S2US * cur->isync_failure / interval_us,
-        100. * cur->isync_us / interval_us, cur->isync_success > 0 ? cur->isync_us / cur->isync_success : 0,
-        MS2US * cur->isync_changed_bytes / interval_us,
-        cur->isync_success > 0 ? cur->isync_changed_bytes / 1000 / cur->isync_success : 0,
-        MS2US * cur->isync_processed_bytes / interval_us,
-        cur->isync_success > 0 ? cur->isync_processed_bytes / 1000 / cur->isync_success : 0,
-
-        S2US * cur->esync_cnt / interval_us, 100. * cur->esync_us / interval_us,
-        cur->esync_cnt > 0 ? cur->esync_us / cur->esync_cnt : 0, MS2US * cur->esync_changed_bytes / interval_us,
-        cur->esync_cnt > 0 ? cur->esync_changed_bytes / 1000 / cur->esync_cnt : 0,
-        MS2US * cur->esync_processed_bytes / interval_us,
-        cur->esync_cnt > 0 ? cur->esync_processed_bytes / 1000 / cur->esync_cnt : 0,
-
-        MS2US * cur->rx_bytes / interval_us, MS2US * cur->rx_pkts / interval_us, MS2US * cur->tx_bytes / interval_us,
-        MS2US * cur->tx_pkts / interval_us, s.ipackets, s.ibytes, s.ierrors, s.imissed, s.rx_nombuf, s.opackets,
-        s.obytes, s.oerrors);
-
     avg->isync_success += cur->isync_success;
     avg->isync_failure += cur->isync_failure;
     avg->isync_barrier_us += cur->isync_barrier_us;
@@ -79,6 +52,30 @@ void tasvir_stats_update() {
     avg->rx_pkts += cur->rx_pkts;
     avg->tx_bytes += cur->rx_bytes;
     avg->tx_pkts += cur->rx_pkts;
+
+    LOG_INFO(
+        "isync_cnt=+%lu/s,-%lu/s isync_t=%.1f%%,%luus/call "
+        "isync_changed=%luKB/s,%luKB/call isync_processed=%luKB/s,%luKB/call",
+        S2US * cur->isync_success / interval_us, S2US * cur->isync_failure / interval_us,
+        100. * cur->isync_us / interval_us, cur->isync_success > 0 ? cur->isync_us / cur->isync_success : 0,
+        MS2US * cur->isync_changed_bytes / interval_us,
+        cur->isync_success > 0 ? cur->isync_changed_bytes / 1000 / cur->isync_success : 0,
+        MS2US * cur->isync_processed_bytes / interval_us,
+        cur->isync_success > 0 ? cur->isync_processed_bytes / 1000 / cur->isync_success : 0);
+    LOG_INFO(
+        "esync_cnt=%lu/s esync_t=%.1f%%,%luus/call "
+        "esync_changed=%luKB/s,%luKB/call esync_processed=%luKB/s,%luKB/call",
+        S2US * cur->esync_cnt / interval_us, 100. * cur->esync_us / interval_us,
+        cur->esync_cnt > 0 ? cur->esync_us / cur->esync_cnt : 0, MS2US * cur->esync_changed_bytes / interval_us,
+        cur->esync_cnt > 0 ? cur->esync_changed_bytes / 1000 / cur->esync_cnt : 0,
+        MS2US * cur->esync_processed_bytes / interval_us,
+        cur->esync_cnt > 0 ? cur->esync_processed_bytes / 1000 / cur->esync_cnt : 0);
+    LOG_INFO(
+        "rx=%luKB/s,%luKpps tx=%luKB/s,%luKpps "
+        "ipkts=%lu ibytes=%lu ierr=%lu imiss=%lu inombuf=%lu opkts=%lu obytes=%lu oerr=%lu",
+        MS2US * cur->rx_bytes / interval_us, MS2US * cur->rx_pkts / interval_us, MS2US * cur->tx_bytes / interval_us,
+        MS2US * cur->tx_pkts / interval_us, s.ipackets, s.ibytes, s.ierrors, s.imissed, s.rx_nombuf, s.opackets,
+        s.obytes, s.oerrors);
 
     memset(cur, 0, sizeof(*cur));
     ttld.ndata->stat_update_req = false;
